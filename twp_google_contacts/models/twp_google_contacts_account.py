@@ -15,6 +15,7 @@ from odoo.tools import escape_psql, html2plaintext, plaintext2html
 from . import broker, google_person
 from .res_config_settings import DEFAULT_LABEL, DETAILS_OFF, DIRECTIONS, OWNERS
 from .res_partner import FROM_GOOGLE
+from .twp_google_contacts_field_map import Unreadable
 from .twp_google_contacts_link import HELD, LIVE, STOPPED
 
 _logger = logging.getLogger(__name__)
@@ -287,9 +288,37 @@ class TwpGoogleContactsAccount(models.Model):
                 "Settings."))
 
     def _synced_groups(self):
-        """The groups that sync, per Settings: the name always, the rest unless left out."""
+        """The groups that sync: per Settings, the name always and the rest unless left out,
+        then each mapped field."""
         off = set((self.env["ir.config_parameter"].sudo().get_param(DETAILS_OFF) or "").split(","))
-        return [group for group in google_person.GROUPS if group == "name" or group not in off]
+        return [group for group in google_person.GROUPS if group == "name" or group not in off] + [
+            group for group in self._maps()]
+
+    def _maps(self):
+        """The mapped fields, by group, read once per sync."""
+        cache = self.env.cr.cache.setdefault("twp_google_contacts_maps", {})
+        if self.id not in cache:
+            maps = self.env["twp.google.contacts.field.map"].sudo().search([])
+            cache[self.id] = {row._group(): row for row in maps}
+        return cache[self.id]
+
+    def _values(self, partner):
+        """The partner as the values Odoo sends: the fixed groups, then each mapped field."""
+        values = google_person.partner_values(partner, html2plaintext)
+        for group, row in self._maps().items():
+            values[group] = row._odoo_value(partner)
+        return values
+
+    def _google(self, person, pushed=None):
+        """The person in the shape of _values."""
+        claimed = defaultdict(set)
+        for row in self._maps().values():
+            if row.target in ("phone", "email"):
+                claimed[row.target].add((row.google_key or "").strip().lower())
+        values = google_person.google_values(person, pushed, claimed)
+        for group, row in self._maps().items():
+            values[group] = google_person.mapped_value(person, row.target, row.google_key)
+        return values
 
     def _syncs_photo(self):
         off = (self.env["ir.config_parameter"].sudo().get_param(DETAILS_OFF) or "").split(",")
@@ -299,8 +328,9 @@ class TwpGoogleContactsAccount(models.Model):
         """Odoo's values with each group left out of the sync as it last was, so it is neither
         sent nor seen as changed."""
         synced = self._synced_groups()
-        return {group: value if group in synced else (pushed or {}).get(group)
-                for group, value in values.items()}
+        maps = self._maps()
+        return {group: value if group in synced and (group not in maps or maps[group]._sends())
+                else (pushed or {}).get(group) for group, value in values.items()}
 
     def _owner_domain(self):
         """Whose contacts go to this Google, as a partner domain: the user's choice, by
@@ -340,7 +370,8 @@ class TwpGoogleContactsAccount(models.Model):
         Pulling first means a change made in Google is in Odoo before Odoo sends its own."""
         self.ensure_one()
         self._check_may_sync()
-        self.env.cr.cache.get("twp_google_contacts_labels", {}).pop(self.id, None)
+        for key in ("twp_google_contacts_labels", "twp_google_contacts_maps"):
+            self.env.cr.cache.get(key, {}).pop(self.id, None)
         account = self.sudo()
         counts = Counter()
         account._pull(counts)
@@ -381,8 +412,7 @@ class TwpGoogleContactsAccount(models.Model):
                 continue
             if not link and partner in reviewing:
                 continue  # the likely match of a Google contact: the user's review links them
-            values = account._masked(google_person.partner_values(partner, html2plaintext),
-                                     link.pushed if link else {})
+            values = account._masked(account._values(partner), link.pushed if link else {})
             try:
                 twin = not link and account._twin(partner, values)
                 if twin:
@@ -483,6 +513,11 @@ class TwpGoogleContactsAccount(models.Model):
 
     def _create_contact(self, partner, values, db_uuid):
         person = google_person.new_person(values, google_person.anchor(db_uuid, partner.id))
+        for group, row in self._maps().items():
+            if values.get(group) is not None:
+                field = google_person.MAPPED_FIELDS[row.target]
+                person[field] = google_person.merge_mapped(
+                    person.get(field, []), row.target, row.google_key, values[group])
         body = self._google_request("POST", "people:createContact",
                                     params={"personFields": google_person.PERSON_FIELDS},
                                     json=person)
@@ -509,7 +544,11 @@ class TwpGoogleContactsAccount(models.Model):
         `groups` limits what is sent; an empty list sends the anchor alone."""
         if groups is None:
             groups = google_person.changed_groups(values, link.pushed)
-        update_fields = [google_person.GROUPS[group] for group in groups]
+        maps = self._maps()
+        mapped = [group for group in groups if group in maps]
+        update_fields = [google_person.GROUPS[group] for group in groups if group not in maps]
+        update_fields += [google_person.MAPPED_FIELDS[maps[group].target] for group in mapped]
+        update_fields = list(dict.fromkeys(update_fields))
         if anchor:
             update_fields.append("clientData")
         for attempt in range(3):
@@ -517,6 +556,12 @@ class TwpGoogleContactsAccount(models.Model):
                 person = self._get_person(link.resource_name)
                 known = google_person.person_hash(person) == link.google_hash
                 body = google_person.merge(person, values, link.pushed, groups)
+                for group in mapped:
+                    row = maps[group]
+                    field = google_person.MAPPED_FIELDS[row.target]
+                    items = body[field] if field in body else person.get(field, [])
+                    body[field] = google_person.merge_mapped(items, row.target, row.google_key,
+                                                             values.get(group))
                 if anchor:
                     body["clientData"] = google_person.with_anchor(person, anchor)
                 body["etag"] = person["etag"]
@@ -874,27 +919,29 @@ class TwpGoogleContactsAccount(models.Model):
             return
         pushed = link.pushed or {}
         synced = self._synced_groups()
-        google = google_person.google_values(person, pushed)
+        maps = self._maps()
+        google = self._google(person, pushed)
         for group in synced:
             # Google writes some values its own way, such as "IN" for Indiana: not a change.
             if google[group] != pushed.get(group) and self._same_value(
                     group, google[group], pushed.get(group)):
                 google[group] = pushed[group]
-        odoo = google_person.partner_values(partner, html2plaintext)
+        odoo = self._values(partner)
+        takes = [g for g in synced if g not in maps or maps[g]._takes()]
         if self.direction == "to_google" or not fill:
             take = []
         elif first:
-            take = [g for g in synced if odoo[g] is None and google[g] is not None]
+            take = [g for g in takes if odoo[g] is None and google[g] is not None]
         else:
             # A partner keeps its name when Google's is cleared.
-            take = [g for g in synced
+            take = [g for g in takes
                     if google[g] != pushed.get(g) and (google[g] is not None or g != "name")
                     and (odoo[g] == pushed.get(g) or self._google_wins(link, partner, g, person))]
         if take:
-            partner.write(self._partner_vals(google, take))
+            partner.write(self._partner_vals(google, take, partner))
         if self._take_photo(link, partner, person, fill) or take or labelled:
             counts["changed_from_google"] += 1
-        after = google_person.partner_values(partner, html2plaintext)
+        after = self._values(partner)
         new_pushed = dict(pushed)
         for group in synced:
             same = self._same_value(group, after[group], google[group])
@@ -925,6 +972,9 @@ class TwpGoogleContactsAccount(models.Model):
             self._update_contact(link, values, anchor)
 
     def _same_value(self, group, a, b):
+        maps = self._maps()
+        if group in maps:
+            return maps[group]._same(a, b)
         if group != "address" or a is None or b is None:
             return google_person.same_value(group, a, b)
         return self._address_vals(a) == self._address_vals(b)
@@ -1057,9 +1107,11 @@ class TwpGoogleContactsAccount(models.Model):
 
     def _create_from_google(self, person):
         """Add a Google contact to Odoo as a new partner, linked, with Odoo's anchor written."""
-        google = google_person.google_values(person)
+        google = self._google(person)
         synced = self._synced_groups()
-        values = self._partner_vals(google, synced)
+        maps = self._maps()
+        values = self._partner_vals(google, [g for g in synced
+                                             if g not in maps or maps[g]._takes()])
         values["name"] = values.get("name") or self._display_name(google)
         values["user_id"] = self.user_id.id  # Tyler's decision, 2026-10-11
         # Labels Odoo made from tags become those tags again, as do labels whose changes come in.
@@ -1072,13 +1124,12 @@ class TwpGoogleContactsAccount(models.Model):
             self._tag_for(incoming[r][0]) for r in in_google if r in incoming))
         values["category_id"] = [Command.set(tags.ids)]
         partner = self.env["res.partner"].with_user(self.user_id).create(values)
-        after = google_person.partner_values(partner, html2plaintext)
+        after = self._values(partner)
         if self.direction == "to_odoo":
-            pushed = {group: google[group] if group in synced else None
-                      for group in google_person.GROUPS}
+            pushed = {group: google[group] if group in synced else None for group in after}
         else:
             pushed = {group: after[group] if group in synced and self._same_value(
-                group, after[group], google[group]) else None for group in google_person.GROUPS}
+                group, after[group], google[group]) else None for group in after}
         link = self.env["twp.google.contacts.link"].sudo().create({
             "account_id": self.id,
             "partner_id": partner.id,
@@ -1152,9 +1203,21 @@ class TwpGoogleContactsAccount(models.Model):
         if not self.candidate_ids.filtered(lambda c: c.state == "pending" and c.kind == "import"):
             self.import_reviewed = True
 
-    def _partner_vals(self, google, groups):
-        """Partner field values from Google's, for the given groups."""
+    def _partner_vals(self, google, groups, partner=None):
+        """Partner field values from Google's, for the given groups. A mapped value this Odoo
+        field cannot hold, such as a choice Odoo does not have, is left in Google and not
+        taken."""
         vals = {}
+        maps = self._maps()
+        partner = partner or self.env["res.partner"].with_user(self.user_id)
+        for group in groups:
+            if group in maps:
+                try:
+                    vals[maps[group].field_id.name] = maps[group]._odoo_write_value(
+                        partner, google[group])
+                except Unreadable:
+                    _logger.info("Google Contacts: a value for %s was not taken for account %s",
+                                 maps[group].field_id.name, self.id)
         if "name" in groups and google["name"]:
             vals["name"] = " ".join(filter(None, (google["name"]["givenName"],
                                                   google["name"]["familyName"])))

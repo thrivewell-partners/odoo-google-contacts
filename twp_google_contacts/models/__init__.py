@@ -9,4 +9,5 @@ from . import twp_google_contacts_candidate
 from . import twp_google_contacts_label
 from . import twp_google_contacts_key
 from . import twp_google_contacts_tag_rule
+from . import twp_google_contacts_field_map
 from . import twp_google_contacts_link

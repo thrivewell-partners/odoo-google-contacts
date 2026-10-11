@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="twp_google_contacts_field_map_view_list" model="ir.ui.view">
+        <field name="name">twp.google.contacts.field.map.list</field>
+        <field name="model">twp.google.contacts.field.map</field>
+        <field name="arch" type="xml">
+            <list string="Other fields" editable="bottom">
+                <field name="sequence" widget="handle"/>
+                <field name="field_id" options="{'no_create': True}"/>
+                <field name="target"/>
+                <field name="google_key" required="target not in ('birthday', 'nickname')"
+                       invisible="target in ('birthday', 'nickname')"/>
+                <field name="direction"/>
+                <field name="create_missing"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="twp_google_contacts_field_map_action" model="ir.actions.act_window">
+        <field name="name">Other fields</field>
+        <field name="res_model">twp.google.contacts.field.map</field>
+        <field name="view_mode">list</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">No other fields sync yet</p>
+            <p>Pair any Odoo contact field, including one made in Studio, with a place in Google:
+               a custom field, the birthday, a nickname, a phone or email of a given type, or an
+               ID. Odoo writes only the custom fields named here; each user's own stay as they
+               are.</p>
+        </field>
+    </record>
+</odoo>

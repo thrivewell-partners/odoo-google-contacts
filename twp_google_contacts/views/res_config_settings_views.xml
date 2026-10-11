@@ -49,8 +49,12 @@
                             <label for="twp_google_contacts_labels_default" class="col-lg-4 o_light_label"/>
                             <field name="twp_google_contacts_labels_default"/>
                         </div>
-                        <button name="%(twp_google_contacts_tag_rule_action)d" type="action"
-                                string="Tags and labels" icon="oi-arrow-right" class="btn-link"/>
+                        <div>
+                            <button name="%(twp_google_contacts_tag_rule_action)d" type="action"
+                                    string="Tags and labels" icon="oi-arrow-right" class="btn-link"/>
+                            <button name="%(twp_google_contacts_field_map_action)d" type="action"
+                                    string="Other fields" icon="oi-arrow-right" class="btn-link ms-3"/>
+                        </div>
                         <div class="mt8">
                             <span class="o_form_label">Details that sync</span>
                             <div class="text-muted">The name always syncs.</div>

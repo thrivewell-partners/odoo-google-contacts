@@ -2,6 +2,7 @@ import base64
 from datetime import timedelta
 
 from odoo import fields
+from odoo.exceptions import ValidationError
 from odoo.tests import TransactionCase, new_test_user, tagged
 
 from .common import SyncCase, png
@@ -409,7 +410,7 @@ class TestTagsAndLabels(SyncCase, TransactionCase):
         self.sync()
         family = self.Tag.search([("name", "=", "Family")])
         self.assertIn(family, self.ada.category_id)
-        self.assertNotIn(self.account.label_resource_name, self.ada.category_id.mapped("name"))
+        self.assertNotIn("Odoo", self.ada.category_id.mapped("name"))
 
         self.google.relabel(resource, remove=["contactGroups/family"])
         self.sync()
@@ -437,3 +438,120 @@ class TestTagsAndLabels(SyncCase, TransactionCase):
         self.sync()
         grace = self.Partner.search([("name", "=", "Grace Hopper")])
         self.assertEqual(grace.category_id, self.vip)
+
+
+@tagged("post_install", "-at_install")
+class TestOtherFields(SyncCase, TransactionCase):
+    """M5: any Odoo contact field paired with a place in Google."""
+
+    def setUp(self):
+        super().setUp()
+        self.Map = self.env["twp.google.contacts.field.map"]
+
+    def field(self, name):
+        return self.env["ir.model.fields"]._get("res.partner", name)
+
+    def pair(self, name, target="custom", key=None, **extra):
+        return self.Map.create(dict({"field_id": self.field(name).id, "target": target,
+                                     "google_key": key}, **extra))
+
+    def custom(self, resource):
+        return {i["key"]: i["value"] for i in self.google.people[resource].get("userDefined", [])}
+
+    def test_a_custom_field_both_ways_keeps_the_users_own(self):
+        self.pair("ref", key="Customer number")
+        self.ada.ref = "C-100"
+        self.sync()
+        resource = self.link(self.ada).resource_name
+        self.assertEqual(self.custom(resource), {"Customer number": "C-100"})
+
+        self.google.change(resource, userDefined=[{"key": "Customer number", "value": "C-200"},
+                                                  {"key": "Shoe size", "value": "8"}])
+        self.sync()
+        self.assertEqual(self.ada.ref, "C-200")
+        self.ada.ref = "C-300"
+        self.sync()
+        self.assertEqual(self.custom(resource), {"Customer number": "C-300", "Shoe size": "8"})
+        self.sync()
+        self.assertEqual(self.account.last_sync_result, "Nothing to change")
+
+    def test_a_pairing_made_later_fills_odoo_from_google(self):
+        self.sync()
+        resource = self.link(self.ada).resource_name
+        self.google.change(resource, userDefined=[{"key": "Customer number", "value": "C-1"}])
+        self.sync()
+        self.assertFalse(self.ada.ref)
+        self.pair("ref", key="Customer number")
+        self.sync()
+        self.assertEqual(self.ada.ref, "C-1")
+
+    def test_a_mobile_of_its_own_is_not_taken_as_the_phone(self):
+        self.pair("ref", target="phone", key="mobile")
+        self.ada.write({"phone": False, "ref": "+1 317 555 0111"})
+        self.sync()
+        resource = self.link(self.ada).resource_name
+        self.assertEqual(self.google.people[resource]["phoneNumbers"],
+                         [{"value": "+1 317 555 0111", "type": "mobile"}])
+        self.google.change(resource, phoneNumbers=[{"value": "+1 317 555 0122", "type": "mobile"}])
+        self.sync()
+        self.assertEqual((self.ada.phone, self.ada.ref), (False, "+1 317 555 0122"))
+
+        self.ada.phone = "(317) 555-0140"
+        self.sync()
+        phones = {p["type"]: p["value"] for p in self.google.people[resource]["phoneNumbers"]}
+        self.assertEqual(phones, {"mobile": "+1 317 555 0122", "work": "(317) 555-0140"})
+
+    def test_a_linked_record_goes_by_name(self):
+        Industry = self.env["res.partner.industry"]
+        energy = Industry.create({"name": "Energy"})
+        self.pair("industry_id", key="Industry")
+        self.ada.industry_id = energy
+        self.sync()
+        resource = self.link(self.ada).resource_name
+        self.assertEqual(self.custom(resource), {"Industry": "Energy"})
+        self.google.change(resource, userDefined=[{"key": "Industry", "value": "Unknown Trade"}])
+        self.sync()
+        self.assertEqual(self.ada.industry_id, energy)  # Odoo has none of that name
+
+        self.Map.search([]).create_missing = True
+        self.google.change(resource, userDefined=[{"key": "Industry", "value": "Solar"}])
+        self.sync()
+        self.assertEqual(self.ada.industry_id.name, "Solar")
+
+    def test_a_choice_goes_by_its_label(self):
+        self.pair("lang", key="Language")
+        self.ada.lang = "en_US"
+        self.sync()
+        resource = self.link(self.ada).resource_name
+        label = dict(self.ada._fields["lang"]._description_selection(self.env))["en_US"]
+        self.assertEqual(self.custom(resource), {"Language": label})
+
+    def test_birthday_and_id(self):
+        self.pair("ref", target="birthday")
+        self.pair("barcode", target="external_id", key="customer")
+        self.ada.write({"ref": "1815-12-10", "barcode": "B-7"})
+        self.sync()
+        person = self.google.people[self.link(self.ada).resource_name]
+        self.assertEqual(person["birthdays"], [{"date": {"year": 1815, "month": 12, "day": 10}}])
+        self.assertEqual(person["externalIds"], [{"value": "B-7", "type": "customer"}])
+
+    def test_one_way_rows(self):
+        self.pair("ref", key="Sent only", direction="to_google")
+        self.pair("barcode", key="Read only", direction="to_odoo")
+        self.ada.write({"ref": "R-1", "barcode": "B-1"})
+        self.sync()
+        resource = self.link(self.ada).resource_name
+        self.assertEqual(self.custom(resource), {"Sent only": "R-1"})
+        self.google.change(resource, userDefined=[{"key": "Sent only", "value": "R-2"},
+                                                  {"key": "Read only", "value": "B-2"}])
+        self.sync()
+        self.assertEqual((self.ada.ref, self.ada.barcode), ("R-1", "B-2"))
+
+    def test_several_records_go_one_way_only(self):
+        with self.assertRaises(ValidationError):
+            self.pair("category_id", key="Tags")
+        self.pair("category_id", key="Tags", direction="to_google")
+        self.ada.category_id |= self.env["res.partner.category"].create({"name": "Gold"})
+        self.sync()
+        tags = self.custom(self.link(self.ada).resource_name)["Tags"]
+        self.assertIn("Gold", tags)

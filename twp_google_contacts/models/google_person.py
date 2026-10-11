@@ -22,7 +22,17 @@ GROUPS = {
     "website": "urls",
     "note": "biographies",
 }
-PERSON_FIELDS = ",".join(list(GROUPS.values())
+# Google's field for each place an Odoo field can be mapped to (M5).
+MAPPED_FIELDS = {
+    "custom": "userDefined",
+    "birthday": "birthdays",
+    "nickname": "nicknames",
+    "phone": "phoneNumbers",
+    "email": "emailAddresses",
+    "external_id": "externalIds",
+}
+EXTRA_FIELDS = ["userDefined", "birthdays", "nicknames", "externalIds"]
+PERSON_FIELDS = ",".join(list(GROUPS.values()) + EXTRA_FIELDS
                          + ["clientData", "memberships", "metadata", "photos"])
 
 # The partner fields behind each group, and behind the photo, to tell which a write changed.
@@ -125,13 +135,16 @@ def label_resource_names(person):
             if m.get("contactGroupMembership", {}).get("contactGroupResourceName")}
 
 
-def google_values(person, pushed=None):
+def google_values(person, pushed=None, claimed=None):
     """The person in the shape of partner_values: Odoo's item from each of Google's lists.
 
     Odoo's item is the one still holding what Odoo last sent, so a value Google only reformatted
-    reads as unchanged. When that item is gone, Google's primary item stands in, then the first.
+    reads as unchanged. When that item is gone, Google's primary item stands in, then the first,
+    leaving out the types `claimed` by mapped fields, such as a mobile phone mapped to its own
+    Odoo field.
     """
     pushed = pushed or {}
+    claimed = claimed or {}
     names = person.get("names") or [{}]
     given, family = names[0].get("givenName") or None, names[0].get("familyName") or None
     values = {"name": {"givenName": given, "familyName": family} if given or family else None}
@@ -144,8 +157,10 @@ def google_values(person, pushed=None):
 
     for group, same in (("email", _same_text), ("phone", _same_phone), ("website", _same_url)):
         old = pushed.get(group)
-        item = _pick(person.get(GROUPS[group]),
-                     lambda i, old=old, same=same: old is not None and same(i.get("value") or "", old))
+        items = person.get(GROUPS[group]) or []
+        free = [i for i in items if (i.get("type") or "").lower() not in claimed.get(group, ())]
+        item = next((i for i in items if old is not None and same(i.get("value") or "", old)),
+                    None) or _pick(free, None)
         value = ((item or {}).get("value") or "").strip() or None
         values[group] = old if value and old is not None and same(value, old) else value
 
@@ -198,7 +213,8 @@ def _lower(text):
 
 
 def changed_groups(values, pushed):
-    return [group for group in GROUPS if values.get(group) != (pushed or {}).get(group)]
+    """The groups, fixed and mapped, whose value is not what Odoo last sent."""
+    return [group for group in values if values[group] != (pushed or {}).get(group)]
 
 
 def merge(person, values, pushed, groups=None):
@@ -208,7 +224,7 @@ def merge(person, values, pushed, groups=None):
     sent last time. The result maps Google field names to the lists to send.
     """
     out = {}
-    for group in GROUPS if groups is None else groups:
+    for group in GROUPS if groups is None else [g for g in groups if g in GROUPS]:
         field = GROUPS[group]
         items = [_clean(item) for item in person.get(field, [])]
         out[field] = MERGERS[group](items, values.get(group), (pushed or {}).get(group))
@@ -382,7 +398,77 @@ def person_hash(person):
     """A hash of the fields Odoo syncs, and the photo, as Google holds them. Equal hashes after a
     sync mean the change Google reports is Odoo's own write coming back (proof 5)."""
     projection = {}
-    for field in GROUPS.values():
+    for field in list(GROUPS.values()) + EXTRA_FIELDS:
         projection[field] = [_clean(item) for item in person.get(field, [])]
     projection["photo"] = photo_url(person)
     return hashlib.sha256(json.dumps(projection, sort_keys=True).encode()).hexdigest()[:32]
+
+
+# Mapped fields: one Odoo field in one place in Google.
+
+def _mapped_index(items, target, key):
+    """Where the mapped value sits in Google's list, or None."""
+    key = (key or "").strip().lower()
+    for index, item in enumerate(items):
+        if target == "custom":
+            found = (item.get("key") or "").strip().lower() == key
+        elif target == "nickname":
+            found = (item.get("type") or "DEFAULT") == "DEFAULT"
+        else:
+            found = (item.get("type") or "").strip().lower() == key
+        if found:
+            return index
+    return None
+
+
+def mapped_value(person, target, key):
+    """The text Google holds in a mapped place, or None. A birthday reads as YYYY-MM-DD, with
+    0000 when Google has no year."""
+    items = person.get(MAPPED_FIELDS[target]) or []
+    if target == "birthday":
+        date = (items[0].get("date") if items else None) or {}
+        if not date.get("month"):
+            return None
+        return "%04d-%02d-%02d" % (date.get("year") or 0, date["month"], date.get("day") or 0)
+    index = _mapped_index(items, target, key)
+    value = items[index].get("value") if index is not None else None
+    return (value or "").strip() or None
+
+
+def merge_mapped(items, target, key, new):
+    """Google's list with the mapped value replaced, added or taken away, and every other item
+    kept: the user's own custom fields, other phones, other IDs."""
+    items = [_clean(item) for item in items]
+    if target == "birthday":
+        if not new:
+            return []
+        try:
+            year, month, day = (int(part) for part in new.strip()[:10].split("-"))
+        except ValueError:
+            return items
+        date = {"month": month, "day": day}
+        if year:
+            date["year"] = year
+        return [{"date": date}]
+    index = _mapped_index(items, target, key)
+    if new is None:
+        return [item for i, item in enumerate(items) if i != index]
+    if target == "custom":
+        item = {"key": key, "value": new}
+    elif target == "nickname":
+        item = {"value": new}
+    else:
+        item = {"value": new, "type": key}
+    if index is None:
+        return items + [item]
+    return items[:index] + [dict(items[index], **item)] + items[index + 1:]
+
+
+def same_mapped(target, a, b):
+    if a is None or b is None:
+        return a is b
+    if target == "phone":
+        return _same_phone(a, b)
+    if target == "email":
+        return _same_text(a, b)
+    return a.strip() == b.strip()

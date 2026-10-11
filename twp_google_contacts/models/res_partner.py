@@ -20,6 +20,8 @@ class ResPartner(models.Model):
         side that changed last. A company's new name is a change to its people's organization."""
         Link = self.env["twp.google.contacts.link"].sudo()
         groups = google_person.groups_written(vals)
+        by_field = self.env["twp.google.contacts.field.map"]._groups_by_field()
+        groups += [group for name in vals for group in by_field.get(name, ())]
         if groups:
             Link.search([("partner_id", "in", self.ids)])._stamp(groups)
         if "name" in vals:
