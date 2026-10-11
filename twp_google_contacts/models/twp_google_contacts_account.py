@@ -1,0 +1,233 @@
+import logging
+import random
+import time
+from datetime import timedelta
+
+import requests
+
+from odoo import _, api, fields, models
+from odoo.exceptions import UserError
+
+from . import broker
+
+_logger = logging.getLogger(__name__)
+
+PEOPLE_API = "https://people.googleapis.com/v1/"
+TIMEOUT = 30
+MAX_ATTEMPTS = 5
+MAX_WAIT = 60
+
+
+def state_message(state):
+    """What a user is told when a connection cannot be used, in words they can act on."""
+    return {
+        "reconnect": _(
+            "Google no longer accepts this connection. It was revoked, or it expired. Open your "
+            "preferences and press Connect again."),
+        "blocked": _(
+            "Your Google Workspace administrator has not allowed ThriveWell's Google Contacts "
+            "app. Ask them to allow it in the Google Admin console, under Security, API "
+            "controls. ThriveWell's setup guide gives the client ID they need."),
+    }.get(state, _("Google Contacts is not connected."))
+
+
+class GoogleReconnect(UserError):
+    """The connection cannot be used until the user acts. The account's state is already set.
+
+    Raising rolls back that state change, so an entry point catches this, reports it, and lets the
+    transaction commit.
+    """
+
+    def __init__(self, state):
+        super().__init__(state_message(state))
+        self.state = state
+
+
+class GoogleApiError(UserError):
+    """Google answered a request with an error. `google_status` is Google's own name for it, such
+    as FAILED_PRECONDITION for a stale etag."""
+
+    def __init__(self, status, google_status, message):
+        super().__init__(_("Google refused the request: %(message)s", message=message))
+        self.status = status
+        self.google_status = google_status
+
+
+class TwpGoogleContactsAccount(models.Model):
+    _name = "twp.google.contacts.account"
+    _description = "Connected Google Contacts account"
+    _rec_name = "google_email"
+
+    user_id = fields.Many2one("res.users", required=True, ondelete="cascade", index=True)
+    google_email = fields.Char(string="Google account", readonly=True)
+    state = fields.Selection(
+        [("connected", "Connected"),
+         ("reconnect", "Needs reconnecting"),
+         ("blocked", "Blocked by Workspace admin")],
+        default="connected", required=True, readonly=True)
+    connection_id = fields.Char(readonly=True, groups="base.group_system")
+    access_token = fields.Char(readonly=True, groups="base.group_system")
+    access_token_expiry = fields.Datetime(readonly=True, groups="base.group_system")
+
+    _user_unique = models.Constraint("UNIQUE(user_id)", "A user connects one Google account.")
+
+    # Connecting and disconnecting, through ThriveWell Connect.
+
+    @api.model
+    def _connect_start(self, return_url, state):
+        """Return the Google sign-in address for the current user."""
+        body = broker.call(self.env, "/v1/connect/start", {
+            "connector": broker.CONNECTOR, "return_url": return_url, "state": state})
+        return body["authorize_url"]
+
+    @api.model
+    def _connect_finish(self, code):
+        """Redeem the one-time code from the sign-in and keep the connection for the current user."""
+        body = broker.call(self.env, "/v1/connect/finish", {"code": code})
+        values = {
+            "google_email": body.get("account_email"),
+            "connection_id": body["connection_id"],
+            "state": "connected",
+            "access_token": False,
+            "access_token_expiry": False,
+        }
+        account = self.sudo().search([("user_id", "=", self.env.uid)])
+        if account:
+            account._release_connection()
+            account.write(values)
+        else:
+            account = self.sudo().create(dict(values, user_id=self.env.uid))
+        return account
+
+    def _release_connection(self):
+        """Give the connection back to ThriveWell Connect, which revokes it at Google."""
+        for account in self.sudo():
+            try:
+                broker.call(self.env, "/v1/disconnect", {"connection_id": account.connection_id})
+            except broker.BrokerError as e:
+                if e.status != 404:  # already gone is the outcome we wanted
+                    raise UserError(_(
+                        "ThriveWell Connect could not disconnect Google (%(error)s). Nothing has "
+                        "changed; try again in a few minutes.", error=e.error)) from None
+
+    def _disconnect(self):
+        self._release_connection()
+        self.sudo().unlink()
+
+    # One-hour access tokens.
+
+    def _get_access_token(self):
+        self.ensure_one()
+        account = self.sudo()
+        if account.state != "connected":
+            raise GoogleReconnect(account.state)
+        now = fields.Datetime.now()
+        if account.access_token and account.access_token_expiry > now + timedelta(seconds=60):
+            return account.access_token
+        try:
+            body = broker.call(self.env, "/v1/token", {"connection_id": account.connection_id})
+        except broker.BrokerError as e:
+            state = {"reconnect_required": "reconnect", "unknown_connection": "reconnect",
+                     "admin_policy_enforced": "blocked"}.get(e.error)
+            if state:
+                account.write({"state": state, "access_token": False, "access_token_expiry": False})
+                raise GoogleReconnect(state) from None
+            if e.error == "connector_not_allowed":
+                raise UserError(_(
+                    "This database's ThriveWell Connect key does not include Google Contacts. "
+                    "Ask ThriveWell to add it.")) from None
+            raise UserError(_(
+                "Google did not answer ThriveWell Connect. Syncing pauses and nothing is lost; "
+                "try again later.")) from None
+        account.write({
+            "access_token": body["access_token"],
+            "access_token_expiry": now + timedelta(seconds=int(body.get("expires_in", 3600))),
+        })
+        return body["access_token"]
+
+    # The request layer for people.googleapis.com.
+
+    def _google_request(self, method, path, params=None, json=None):
+        """Call the People API for this account and return the decoded answer.
+
+        Retries a lapsed token once, and waits out 429 and 5xx answers with exponential backoff.
+        Writes take a lock on the account row first, because Google asks for one write at a time
+        per account; a second write in another worker waits for the first to commit.
+        """
+        self.ensure_one()
+        if method != "GET":
+            self.env.cr.execute(
+                "SELECT id FROM twp_google_contacts_account WHERE id = %s FOR UPDATE", [self.id])
+        renewed = False
+        response = None
+        for attempt in range(MAX_ATTEMPTS):
+            token = self._get_access_token()
+            try:
+                response = requests.request(
+                    method, PEOPLE_API + path, params=params, json=json, timeout=TIMEOUT,
+                    headers={"Authorization": "Bearer " + token})
+            except requests.RequestException as e:
+                _logger.info("People API %s %s: %s", method, path, type(e).__name__)
+                response = None
+            if response is not None and response.status_code == 401 and not renewed:
+                renewed = True
+                self.sudo().write({"access_token": False, "access_token_expiry": False})
+                continue
+            if response is None or response.status_code == 429 or response.status_code >= 500:
+                if attempt + 1 < MAX_ATTEMPTS:
+                    time.sleep(self._backoff(attempt, response))
+                    continue
+            break
+        if response is None:
+            raise UserError(_("Google could not be reached. Nothing has changed; try again later."))
+        try:
+            body = response.json() if response.content else {}
+        except ValueError:
+            body = {}
+        if response.status_code < 400:
+            return body
+        error = body.get("error") if isinstance(body.get("error"), dict) else {}
+        reasons = {d.get("reason") for d in error.get("details", []) if isinstance(d, dict)}
+        if response.status_code in (401, 403) and (
+                response.status_code == 401 or "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in reasons):
+            # The token no longer carries the Contacts permission.
+            self.sudo().write({"state": "reconnect", "access_token": False,
+                               "access_token_expiry": False})
+            raise GoogleReconnect("reconnect")
+        raise GoogleApiError(response.status_code, error.get("status"),
+                             error.get("message") or "HTTP %s" % response.status_code)
+
+    @staticmethod
+    def _backoff(attempt, response):
+        retry_after = response is not None and response.headers.get("Retry-After")
+        if retry_after and retry_after.isdigit():
+            return min(int(retry_after), MAX_WAIT)
+        return min(2 ** attempt, MAX_WAIT) + random.random()
+
+    # Buttons.
+
+    def action_check(self):
+        """Ask Google for one label, to prove the whole chain works. Reports, never raises."""
+        self.ensure_one()
+        try:
+            body = self._google_request("GET", "contactGroups", params={"pageSize": 1})
+        except GoogleReconnect as e:
+            return self._notify(e.args[0], "danger")
+        except UserError as e:
+            return self._notify(e.args[0], "warning")
+        return self._notify(_("Google Contacts is working for %(email)s. Google answered with "
+                              "%(count)s labels.", email=self.google_email,
+                              count=body.get("totalItems", 0)), "success")
+
+    def action_disconnect(self):
+        self._disconnect()
+        return {"type": "ir.actions.client", "tag": "soft_reload"}
+
+    @api.model
+    def _notify(self, message, kind):
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {"title": _("Google Contacts"), "message": message, "type": kind,
+                       "sticky": kind != "success"},
+        }

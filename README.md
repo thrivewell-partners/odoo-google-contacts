@@ -5,7 +5,7 @@ ways, through ThriveWell's verified Google app. No module code yet: this repo is
 
 | Module | Status | What it does |
 |---|---|---|
-| `twp_google_contacts` | not started | Each user connects their own Google account from Odoo. Contacts sync both ways on a schedule, with Google's lists merged rather than replaced, deletes off unless the admin turns them on, and only Google contacts under one label coming into Odoo |
+| `twp_google_contacts` | M1 of 5: connect and disconnect | Each user connects their own Google account from Odoo. Contacts sync both ways on a schedule, with Google's lists merged rather than replaced, deletes off unless the admin turns them on, and only Google contacts under one label coming into Odoo |
 
 This repo is the master copy. Releases are copied into each client's code repo, which is that
 client's addons path on Oduflow.
@@ -16,6 +16,10 @@ The module never holds the Google app's secret. A ThriveWell service, ThriveWell
 `connect.thrivewellag.com`, holds it along with each user's long-lived Google sign-in, and hands
 the module a one-hour access token on request. The module then talks to Google directly. Contacts
 never pass through ThriveWell Connect. Each client database needs a key issued by ThriveWell.
+
+An administrator enters that key in Settings, under Integrations. Each user then connects from their
+own preferences, on the Google Contacts tab, after a screen that says what the connection does.
+On Google's screen the Contacts permission is a checkbox of its own, and it must be ticked.
 
 ## Design
 

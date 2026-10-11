@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="twp_google_contacts_connect_view_form" model="ir.ui.view">
+        <field name="name">twp.google.contacts.connect.form</field>
+        <field name="model">twp.google.contacts.connect</field>
+        <field name="arch" type="xml">
+            <form string="Connect Google Contacts">
+                <div name="disclosure">
+                    <p>
+                        Connecting lets Odoo read and change the contacts in your Google account,
+                        so your Odoo contacts and your Google contacts stay in step.
+                    </p>
+                    <ul>
+                        <li><strong>What Odoo reads:</strong> your Google contacts and labels.
+                            Only contacts under the label your administrator chooses come into Odoo.</li>
+                        <li><strong>What Odoo changes:</strong> it creates and updates Google
+                            contacts for your Odoo contacts and adds them to that label. It deletes a
+                            Google contact only if your administrator has turned deleting on.</li>
+                        <li><strong>Where your contacts go:</strong> only into this Odoo database.
+                            ThriveWell Connect, the ThriveWell service that signs you in to Google,
+                            keeps your sign-in and never your contacts. Your contacts are never sold
+                            or used for advertising.</li>
+                        <li><strong>How to stop:</strong> press Disconnect in your preferences. Odoo
+                            gives the sign-in back and Google removes the access. You can also remove
+                            it in your Google Account, under Security, Third-party apps.</li>
+                    </ul>
+                    <p>
+                        ThriveWell's use of information received from Google APIs adheres to the
+                        Google API Services User Data Policy, including the Limited Use requirements.
+                    </p>
+                    <div class="alert alert-info" role="status">
+                        On Google's screen, <strong>tick the box beside the Contacts
+                        permission</strong>. Without it, nothing connects.
+                    </div>
+                </div>
+                <group>
+                    <field name="consent"/>
+                </group>
+                <footer>
+                    <button name="action_continue" type="object" string="Continue to Google"
+                            class="btn-primary" invisible="not consent" data-hotkey="q"/>
+                    <button string="Cancel" special="cancel" class="btn-secondary" data-hotkey="x"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+</odoo>

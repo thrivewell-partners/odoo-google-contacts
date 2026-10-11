@@ -1,0 +1,18 @@
+{
+    "name": "Google Contacts",
+    "summary": "Each user connects their own Google account; contacts sync with Odoo both ways",
+    "version": "19.0.0.1.0",
+    "category": "Productivity",
+    "license": "LGPL-3",
+    "author": "ThriveWell Partners",
+    "depends": ["base_setup"],
+    "data": [
+        "security/ir.model.access.csv",
+        "views/twp_google_contacts_account_views.xml",
+        "views/res_config_settings_views.xml",
+        "views/res_users_views.xml",
+        "views/return_templates.xml",
+        "wizard/twp_google_contacts_connect_views.xml",
+    ],
+    "installable": True,
+}

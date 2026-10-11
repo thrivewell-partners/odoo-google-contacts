@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="twp_google_contacts_account_view_list" model="ir.ui.view">
+        <field name="name">twp.google.contacts.account.list</field>
+        <field name="model">twp.google.contacts.account</field>
+        <field name="arch" type="xml">
+            <list string="Connected Google accounts" create="0" edit="0" delete="0">
+                <field name="user_id"/>
+                <field name="google_email"/>
+                <field name="state" widget="badge" decoration-success="state == 'connected'"
+                       decoration-warning="state == 'reconnect'" decoration-danger="state == 'blocked'"/>
+                <field name="create_date" string="Connected on"/>
+                <button name="action_check" type="object" string="Check" icon="fa-plug"
+                        invisible="state != 'connected'"/>
+                <button name="action_disconnect" type="object" string="Disconnect" icon="fa-unlink"
+                        confirm="Disconnect this Google account? Its sign-in is given back and syncing stops."/>
+            </list>
+        </field>
+    </record>
+
+    <record id="twp_google_contacts_account_action" model="ir.actions.act_window">
+        <field name="name">Connected Google accounts</field>
+        <field name="res_model">twp.google.contacts.account</field>
+        <field name="view_mode">list</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">No one has connected Google Contacts yet</p>
+            <p>Each user connects their own Google account from their preferences.</p>
+        </field>
+    </record>
+</odoo>

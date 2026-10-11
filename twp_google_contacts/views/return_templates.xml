@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <template id="return_page" name="Google Contacts: back from Google">
+        <t t-call="web.login_layout">
+            <div class="text-center">
+                <h4 t-if="ok">Connected</h4>
+                <h4 t-else="">Not connected</h4>
+                <p t-out="message"/>
+                <a href="/odoo" class="btn btn-primary">Back to Odoo</a>
+            </div>
+        </t>
+    </template>
+</odoo>
