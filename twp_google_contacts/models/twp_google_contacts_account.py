@@ -258,7 +258,11 @@ class TwpGoogleContactsAccount(models.Model):
         partners = account._partners_to_push()
         links = {link.partner_id.id: link for link in account.link_ids}
         main = account._main_label()
-        tag_labels = account._tag_labels(partners.category_id)
+        # In tagged mode the scope tags only choose who syncs; they are not labels of their own.
+        scope_tags = self.env["res.partner.category"]
+        if self.env["ir.config_parameter"].sudo().get_param("twp_google_contacts.scope") == "tagged":
+            scope_tags = account.user_id.company_id.twp_google_contacts_tag_ids
+        tag_labels = account._tag_labels(partners.category_id - scope_tags)
         db_uuid = self.env["ir.config_parameter"].sudo().get_param("database.uuid")
         counts = Counter()
         label_changes = []
@@ -280,7 +284,8 @@ class TwpGoogleContactsAccount(models.Model):
                 _logger.warning("Google Contacts: partner %s not synced for account %s: %s %s",
                                 partner.id, account.id, e.status, e.google_status)
                 continue
-            wanted = sorted({main} | {tag_labels[tag.id] for tag in partner.category_id})
+            wanted = sorted({main} | {tag_labels[tag.id]
+                                      for tag in partner.category_id - scope_tags})
             if link.state == "active" and wanted != (link.label_resource_names or []):
                 label_changes.append((link, wanted))
             self._commit_step()

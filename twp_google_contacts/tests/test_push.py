@@ -204,6 +204,7 @@ class TestPush(GoogleContactsCase, TransactionCase):
         self.env["ir.config_parameter"].sudo().set_param("twp_google_contacts.scope", "tagged")
         self.push()
         self.assertEqual(self.account.link_ids.partner_id, tagged_one)
+        self.assertNotIn("Google test", [g["name"] for g in self.google.groups.values()])
 
     def test_a_copied_database_does_not_sync(self):
         params = self.env["ir.config_parameter"].sudo()
