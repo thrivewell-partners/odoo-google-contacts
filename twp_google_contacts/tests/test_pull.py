@@ -118,12 +118,22 @@ class TestPull(GoogleContactsCase, TransactionCase):
         self.assertEqual((partner.street, partner.city, partner.zip, partner.state_id.code,
                           partner.country_id.code), ("1 Pier Rd", "Arlington", "22201", "VA", "US"))
         self.assertIn("first compiler", partner.comment)
-        self.assertEqual(partner.category_id, vip | self.scope)
+        self.assertEqual(partner.category_id, vip)
         self.assertEqual(self.google.people[resource]["clientData"][0]["key"], "thrivewell.anchor")
         # Nothing more goes back: the next sync makes no writes.
         self.google.writes.clear()
         self.sync()
         self.assertEqual(self.google.writes, [])
+
+    def test_a_contact_linked_from_google_keeps_syncing_outside_the_scope(self):
+        resource = self.grace()
+        hopper = self.Partner.create({"name": "Grace Hopper", "email": "grace@navy.example"})
+        self.sync()
+        self.pending().action_link()
+        self.assertNotIn(self.scope, hopper.category_id)
+        hopper.email = "grace@hopper.example"
+        self.sync()
+        self.assertEqual(self.google.emails(resource)[0], "grace@hopper.example")
 
     def test_kept_out_is_not_asked_again(self):
         self.grace()

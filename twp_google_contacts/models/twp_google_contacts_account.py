@@ -256,22 +256,27 @@ class TwpGoogleContactsAccount(models.Model):
                 "Settings."))
 
     def _partners_to_push(self):
-        """The partners this account's user can see that belong in Google, per Settings."""
+        """The partners this account's user can see that belong in Google, per Settings, and
+        every partner already linked to a Google contact: a link keeps syncing once made, whether
+        it was made from Odoo or from Google."""
         self.ensure_one()
+        Partner = self.env["res.partner"].with_user(self.user_id)
+        linked = Partner.search([("id", "in", self.link_ids.filtered(
+            lambda l: l.state == "active").partner_id.ids)])
         scope = self.env["ir.config_parameter"].sudo().get_param(
             "twp_google_contacts.scope", "contactable")
         domain = [("is_company", "=", False), ("type", "=", "contact")]
         if scope == "tagged":
             tags = self.user_id.company_id.twp_google_contacts_tag_ids
             if not tags:
-                return self.env["res.partner"]
+                return linked.sudo()
             domain.append(("category_id", "in", tags.ids))
         else:
             domain += ["|", ("email", "!=", False), ("phone", "!=", False)]
         # Colleagues are users of this database, not contacts to keep in Google.
         colleagues = self.env["res.users"].sudo().search([("share", "=", False)]).partner_id
         domain.append(("id", "not in", colleagues.ids))
-        return self.env["res.partner"].with_user(self.user_id).search(domain).sudo()
+        return (Partner.search(domain) | linked).sudo()
 
     def _sync(self):
         """Pull Google's changes into Odoo, then push Odoo's to Google, and record the result.
@@ -595,12 +600,8 @@ class TwpGoogleContactsAccount(models.Model):
         Label = self.env["twp.google.contacts.label"].sudo()
         labels = Label.search([("account_id", "=", self.id), ("resource_name", "in",
                                list(google_person.label_resource_names(person)))])
-        tags = labels.category_id
+        values["category_id"] = [Command.set(labels.category_id.ids)]
         params = self.env["ir.config_parameter"].sudo()
-        if params.get_param("twp_google_contacts.scope") == "tagged":
-            # It came in through the label, so it belongs to what Odoo sends back.
-            tags |= self.user_id.company_id.twp_google_contacts_tag_ids
-        values["category_id"] = [Command.set(tags.ids)]
         partner = self.env["res.partner"].with_user(self.user_id).create(values)
         pushed = google_person.partner_values(partner, html2plaintext)
         link = self.env["twp.google.contacts.link"].sudo().create({
