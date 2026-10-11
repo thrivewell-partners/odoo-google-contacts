@@ -26,6 +26,8 @@ class TwpGoogleContactsConnect(models.TransientModel):
         # else cannot be finished into this user's account.
         state = secrets.token_urlsafe(32)
         request.session[SESSION_KEY] = state
-        return_url = request.httprequest.url_root.rstrip("/") + RETURN_PATH
+        # The database's own address, not the request's: behind an https proxy Odoo sees the
+        # request as http unless proxy mode is on, and Connect refuses an address it doesn't know.
+        return_url = self.get_base_url().rstrip("/") + RETURN_PATH
         url = self.env["twp.google.contacts.account"]._connect_start(return_url, state)
         return {"type": "ir.actions.act_url", "url": url, "target": "self"}

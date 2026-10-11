@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+from unittest.mock import patch
+
 from odoo.exceptions import AccessError, UserError
 from odoo.tests import HttpCase, TransactionCase, new_test_user, tagged
 
@@ -21,6 +24,19 @@ class TestConnect(GoogleContactsCase, TransactionCase):
         self.assertEqual(body, {"connector": "google-contacts",
                                 "return_url": "http://odoo.test" + RETURN_PATH, "state": "s1"})
         self.assertEqual(headers["Authorization"], "Bearer twc_test")
+
+    def test_continue_returns_to_the_databases_own_address(self):
+        self.env["ir.config_parameter"].sudo().set_param("web.base.url", "https://odoo.test")
+        browser = SimpleNamespace(session={},
+                                  httprequest=SimpleNamespace(url_root="http://odoo.test/"))
+        wizard = self.env["twp.google.contacts.connect"].create({"consent": True})
+        with patch("odoo.addons.twp_google_contacts.wizard.twp_google_contacts_connect.request",
+                   browser):
+            action = wizard.action_continue()
+        self.assertTrue(action["url"].startswith("https://accounts.google.com/"))
+        self.assertEqual(self.broker.calls[0][1]["return_url"], "https://odoo.test" + RETURN_PATH,
+                         "the address behind an https proxy, not the request's http one")
+        self.assertEqual(browser.session[SESSION_KEY], self.broker.calls[0][1]["state"])
 
     def test_no_key_says_who_must_act(self):
         self.env["ir.config_parameter"].sudo().set_param("twp_google_contacts.broker_key", False)
