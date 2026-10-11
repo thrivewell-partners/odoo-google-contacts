@@ -13,7 +13,7 @@ from odoo.exceptions import AccessError, UserError, ValidationError
 from odoo.tools import escape_psql, html2plaintext, plaintext2html
 
 from . import broker, google_person
-from .res_config_settings import DEFAULT_LABEL, DIRECTIONS, OWNERS
+from .res_config_settings import DEFAULT_LABEL, DETAILS_OFF, DIRECTIONS, OWNERS
 from .res_partner import FROM_GOOGLE
 from .twp_google_contacts_link import HELD, LIVE, STOPPED
 
@@ -286,6 +286,22 @@ class TwpGoogleContactsAccount(models.Model):
                 "a test account, an administrator can turn on \"Sync from this copy\" in "
                 "Settings."))
 
+    def _synced_groups(self):
+        """The groups that sync, per Settings: the name always, the rest unless left out."""
+        off = set((self.env["ir.config_parameter"].sudo().get_param(DETAILS_OFF) or "").split(","))
+        return [group for group in google_person.GROUPS if group == "name" or group not in off]
+
+    def _syncs_photo(self):
+        off = (self.env["ir.config_parameter"].sudo().get_param(DETAILS_OFF) or "").split(",")
+        return "photo" not in off
+
+    def _masked(self, values, pushed):
+        """Odoo's values with each group left out of the sync as it last was, so it is neither
+        sent nor seen as changed."""
+        synced = self._synced_groups()
+        return {group: value if group in synced else (pushed or {}).get(group)
+                for group, value in values.items()}
+
     def _owner_domain(self):
         """Whose contacts go to this Google, as a partner domain: the user's choice, by
         Salesperson."""
@@ -364,7 +380,8 @@ class TwpGoogleContactsAccount(models.Model):
                 continue
             if not link and partner in reviewing:
                 continue  # the likely match of a Google contact: the user's review links them
-            values = google_person.partner_values(partner, html2plaintext)
+            values = account._masked(google_person.partner_values(partner, html2plaintext),
+                                     link.pushed if link else {})
             try:
                 twin = not link and account._twin(partner, values)
                 if twin:
@@ -442,7 +459,8 @@ class TwpGoogleContactsAccount(models.Model):
 
         The hash is left as it was: the photo coming back is then compared value by value, which
         finds it unchanged, and a change Google made meanwhile is not mistaken for Odoo's."""
-        if not link.photo_synced or (checksum or None) == (link.photo_checksum or None):
+        if (not link.photo_synced or not self._syncs_photo()
+                or (checksum or None) == (link.photo_checksum or None)):
             return False
         result = None
         if checksum:
@@ -852,8 +870,9 @@ class TwpGoogleContactsAccount(models.Model):
             return
         partner = link.partner_id.with_user(self.user_id).with_context(**{FROM_GOOGLE: True})
         pushed = link.pushed or {}
+        synced = self._synced_groups()
         google = google_person.google_values(person, pushed)
-        for group in google_person.GROUPS:
+        for group in synced:
             # Google writes some values its own way, such as "IN" for Indiana: not a change.
             if google[group] != pushed.get(group) and self._same_value(
                     group, google[group], pushed.get(group)):
@@ -862,10 +881,10 @@ class TwpGoogleContactsAccount(models.Model):
         if self.direction == "to_google" or not fill:
             take = []
         elif first:
-            take = [g for g in google_person.GROUPS if odoo[g] is None and google[g] is not None]
+            take = [g for g in synced if odoo[g] is None and google[g] is not None]
         else:
             # A partner keeps its name when Google's is cleared.
-            take = [g for g in google_person.GROUPS
+            take = [g for g in synced
                     if google[g] != pushed.get(g) and (google[g] is not None or g != "name")
                     and (odoo[g] == pushed.get(g) or self._google_wins(link, partner, g, person))]
         if take:
@@ -874,7 +893,7 @@ class TwpGoogleContactsAccount(models.Model):
             counts["changed_from_google"] += 1
         after = google_person.partner_values(partner, html2plaintext)
         new_pushed = dict(pushed)
-        for group in google_person.GROUPS:
+        for group in synced:
             same = self._same_value(group, after[group], google[group])
             if group in take or (not first and same):
                 new_pushed[group] = after[group]
@@ -885,12 +904,12 @@ class TwpGoogleContactsAccount(models.Model):
                 # Odoo's stands: it takes the place of Google's new value, not a place beside it.
                 new_pushed[group] = google[group]
         if self.direction == "to_odoo":
-            new_pushed = {group: google[group] for group in google_person.GROUPS}
+            new_pushed.update({group: google[group] for group in synced})
         link.write({"pushed": new_pushed, "etag": person.get("etag"),
                     "google_hash": google_person.person_hash(person),
                     "synced_at": fields.Datetime.now()})
         if first:
-            self._write_anchor(link, after)
+            self._write_anchor(link, self._masked(after, new_pushed))
 
     def _write_anchor(self, link, values):
         """Write Odoo's anchor on a contact linked from Google, with what Odoo adds to it. Google
@@ -926,6 +945,8 @@ class TwpGoogleContactsAccount(models.Model):
 
         The first comparison keeps both photos where both have one, and leaves a photo only Odoo
         has for the push to send."""
+        if not self._syncs_photo():
+            return False
         url = google_person.photo_url(person)
         checksum = self._photo_sums(partner).get(partner.id)
         if self.direction == "to_google":
@@ -1034,7 +1055,8 @@ class TwpGoogleContactsAccount(models.Model):
     def _create_from_google(self, person):
         """Add a Google contact to Odoo as a new partner, linked, with Odoo's anchor written."""
         google = google_person.google_values(person)
-        values = self._partner_vals(google, list(google_person.GROUPS))
+        synced = self._synced_groups()
+        values = self._partner_vals(google, synced)
         values["name"] = values.get("name") or self._display_name(google)
         values["user_id"] = self.user_id.id  # Tyler's decision, 2026-10-11
         # Labels Odoo made from tags become those tags again.
@@ -1045,10 +1067,11 @@ class TwpGoogleContactsAccount(models.Model):
         partner = self.env["res.partner"].with_user(self.user_id).create(values)
         after = google_person.partner_values(partner, html2plaintext)
         if self.direction == "to_odoo":
-            pushed = dict(google)
+            pushed = {group: google[group] if group in synced else None
+                      for group in google_person.GROUPS}
         else:
-            pushed = {group: after[group] if self._same_value(group, after[group], google[group])
-                      else None for group in google_person.GROUPS}
+            pushed = {group: after[group] if group in synced and self._same_value(
+                group, after[group], google[group]) else None for group in google_person.GROUPS}
         link = self.env["twp.google.contacts.link"].sudo().create({
             "account_id": self.id,
             "partner_id": partner.id,
@@ -1061,7 +1084,7 @@ class TwpGoogleContactsAccount(models.Model):
             "synced_at": fields.Datetime.now(),
         })
         self._take_photo(link, partner.with_context(**{FROM_GOOGLE: True}), person)
-        self._write_anchor(link, after)
+        self._write_anchor(link, self._masked(after, pushed))
         return partner
 
     def _review(self, candidates, decision):

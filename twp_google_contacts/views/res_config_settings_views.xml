@@ -41,7 +41,20 @@
                             <label for="twp_google_contacts_label" class="col-lg-4 o_light_label"/>
                             <field name="twp_google_contacts_label"/>
                         </div>
-                        <div class="row">
+                        <div class="mt8">
+                            <span class="o_form_label">Details that sync</span>
+                            <div class="text-muted">The name always syncs.</div>
+                            <div class="d-flex flex-wrap gap-3">
+                                <span><field name="twp_google_contacts_sync_organization"/><label for="twp_google_contacts_sync_organization" class="o_light_label"/></span>
+                                <span><field name="twp_google_contacts_sync_email"/><label for="twp_google_contacts_sync_email" class="o_light_label"/></span>
+                                <span><field name="twp_google_contacts_sync_phone"/><label for="twp_google_contacts_sync_phone" class="o_light_label"/></span>
+                                <span><field name="twp_google_contacts_sync_address"/><label for="twp_google_contacts_sync_address" class="o_light_label"/></span>
+                                <span><field name="twp_google_contacts_sync_website"/><label for="twp_google_contacts_sync_website" class="o_light_label"/></span>
+                                <span><field name="twp_google_contacts_sync_note"/><label for="twp_google_contacts_sync_note" class="o_light_label"/></span>
+                                <span><field name="twp_google_contacts_sync_photo"/><label for="twp_google_contacts_sync_photo" class="o_light_label"/></span>
+                            </div>
+                        </div>
+                        <div class="row mt8">
                             <label for="twp_google_contacts_conflict" class="col-lg-4 o_light_label"/>
                             <field name="twp_google_contacts_conflict"/>
                         </div>

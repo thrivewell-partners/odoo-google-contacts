@@ -1,4 +1,4 @@
-from odoo import fields, models
+from odoo import api, fields, models
 
 from .broker import DEFAULT_URL
 
@@ -7,6 +7,10 @@ DEFAULT_LABEL = "Odoo"
 DIRECTIONS = [("both", "Both ways"),
               ("to_google", "Odoo to Google only"),
               ("to_odoo", "Google to Odoo only")]
+# The details a client may leave out of the sync. The name always syncs.
+DETAILS = ["organization", "email", "phone", "address", "website", "note", "photo"]
+DETAILS_OFF = "twp_google_contacts.details_off"
+
 OWNERS = [("all", "Everyone in scope"),
           ("mine", "Only contacts they own"),
           ("mine_unowned", "Theirs, and contacts with no owner")]
@@ -60,6 +64,13 @@ class ResConfigSettings(models.TransientModel):
         default="label",
         help="All: every contact in a user's Google comes into Odoo, where every Odoo user can "
              "see it. The label is how a user keeps personal contacts out of Odoo.")
+    twp_google_contacts_sync_organization = fields.Boolean(string="Company and job title")
+    twp_google_contacts_sync_email = fields.Boolean(string="Email")
+    twp_google_contacts_sync_phone = fields.Boolean(string="Phone")
+    twp_google_contacts_sync_address = fields.Boolean(string="Address")
+    twp_google_contacts_sync_website = fields.Boolean(string="Website")
+    twp_google_contacts_sync_note = fields.Boolean(string="Notes")
+    twp_google_contacts_sync_photo = fields.Boolean(string="Photo")
     twp_google_contacts_conflict = fields.Selection(
         [("latest", "The most recent change"),
          ("odoo", "Odoo's"),
@@ -80,3 +91,15 @@ class ResConfigSettings(models.TransientModel):
         help="This database is a copy. Turn this on only when every connected Google account is a "
              "test account, because a copy claims the same contacts as the database it came "
              "from.")
+
+    @api.model
+    def get_values(self):
+        res = super().get_values()
+        off = (self.env["ir.config_parameter"].sudo().get_param(DETAILS_OFF) or "").split(",")
+        res.update({"twp_google_contacts_sync_" + detail: detail not in off for detail in DETAILS})
+        return res
+
+    def set_values(self):
+        super().set_values()
+        off = [d for d in DETAILS if not self["twp_google_contacts_sync_" + d]]
+        self.env["ir.config_parameter"].sudo().set_param(DETAILS_OFF, ",".join(off) or False)

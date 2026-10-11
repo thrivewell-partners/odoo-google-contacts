@@ -271,3 +271,54 @@ class TestOwnership(SyncCase, TransactionCase):
         self.pending().action_skip()
         self.sync()
         self.assertNotEqual(self.link(self.ada).resource_name, kept_out)
+
+
+@tagged("post_install", "-at_install")
+class TestDetails(SyncCase, TransactionCase):
+    """M5: Settings leave chosen details out of the sync."""
+
+    def leave_out(self, *details):
+        settings = self.env["res.config.settings"].create({})
+        for detail in details:
+            settings["twp_google_contacts_sync_" + detail] = False
+        settings.execute()
+
+    def test_settings_show_every_detail_on_by_default(self):
+        settings = self.env["res.config.settings"].create({})
+        self.assertTrue(settings.twp_google_contacts_sync_note)
+        self.leave_out("note", "photo")
+        settings = self.env["res.config.settings"].create({})
+        self.assertFalse(settings.twp_google_contacts_sync_note)
+        self.assertTrue(settings.twp_google_contacts_sync_email)
+
+    def test_a_detail_left_out_is_neither_sent_nor_taken(self):
+        self.leave_out("note", "photo")
+        self.ada.write({"comment": "<p>Private to Odoo</p>", "image_1920": png("green")})
+        self.sync()
+        resource = self.link(self.ada).resource_name
+        self.assertNotIn("biographies", self.google.people[resource])
+        self.assertNotIn(resource, self.google.photos)
+
+        self.google.change(resource, biographies=[{"value": "Google's note"}],
+                           emailAddresses=[{"value": "ada@google-side.example"}])
+        self.sync()
+        self.assertEqual(self.ada.email, "ada@google-side.example")
+        self.assertIn("Private to Odoo", self.ada.comment)
+
+    def test_a_detail_turned_back_on_is_sent(self):
+        self.leave_out("note")
+        self.ada.comment = "<p>Now shared</p>"
+        self.sync()
+        resource = self.link(self.ada).resource_name
+        self.leave_out()
+        self.sync()
+        self.assertEqual(self.google.people[resource]["biographies"][0]["value"], "Now shared")
+
+    def test_a_contact_brought_in_takes_only_what_syncs(self):
+        self.leave_out("phone")
+        self.account.sudo().import_reviewed = True
+        self.grace()
+        self.sync()
+        grace = self.Partner.search([("name", "=", "Grace Hopper")])
+        self.assertEqual(grace.email, "grace@navy.example")
+        self.assertFalse(grace.phone)
