@@ -85,6 +85,12 @@ class GoogleApiError(UserError):
         self.reasons = set(reasons)
 
 
+# The words a chatter note uses for each group of details.
+GROUP_WORDS = {"name": "name", "organization": "company and job title", "email": "email",
+               "phone": "phone", "address": "address", "website": "website", "note": "notes",
+               "photo": "photo", "tags": "tags"}
+
+
 class GoogleQuota(UserError):
     """Google's limit for this account was still reached after waiting a minute out. The sync
     stops where it is: what was done is kept, and the rest continues on a later run. `daily` when
@@ -555,6 +561,17 @@ class TwpGoogleContactsAccount(models.Model):
     def _rollback(self):
         self.env.cr.rollback()
 
+    def _note(self, partner, message):
+        """Something the sync did to a partner, in words for its chatter. Nothing is done with it
+        here: the twp_google_contacts_mail bridge, installed with Discuss, posts it."""
+
+    def _note_changes(self, partner, groups):
+        maps = self._maps()
+        words = [maps[g].field_id.field_description if g in maps else GROUP_WORDS.get(g, g)
+                 for g in groups]
+        self._note(partner, self.env._("Changed in the Google Contacts of %(email)s: %(what)s.",
+                                       email=self.google_email, what=", ".join(words)))
+
     def _failed(self, counts, error, partner=None, resource=None):
         """One contact, or one label, that did not sync: counted, kept for the log, and logged."""
         counts["failed"] += 1
@@ -976,6 +993,9 @@ class TwpGoogleContactsAccount(models.Model):
         })
         self._take_changes(link, person, counts, first=True, fill=False)
         counts["matched"] += 1
+        self._note(partner, self.env._(
+            "Linked to the contact already in the Google Contacts of %(email)s, found by its "
+            "email or phone.", email=self.google_email))
         return link
 
     def _step(self, resource, counts, method, *args):
@@ -1104,6 +1124,10 @@ class TwpGoogleContactsAccount(models.Model):
             candidate.write(values)
         else:
             Candidate.create(dict(values, account_id=self.id, resource_name=link.resource_name))
+        self._note(link.partner_id, self.env._(
+            "Merged into %(other)s in the Google Contacts of %(email)s. Whether Odoo merges them "
+            "too waits on that user's review list.", other=survivor.partner_id.display_name,
+            email=self.google_email))
 
     def _archive_deleted(self, link, counts):
         """Archive the partner of a contact deleted in Google, when Settings say so and no other
@@ -1126,6 +1150,9 @@ class TwpGoogleContactsAccount(models.Model):
             return
         link.archived_by_sync = True
         counts["archived"] += 1
+        self._note(partner, self.env._(
+            "Archived, because it was deleted in the Google Contacts of %(email)s.",
+            email=self.google_email))
 
     def _our_labels(self):
         return {self.label_resource_name} | set(self.env["twp.google.contacts.label"].sudo().search(
@@ -1202,8 +1229,10 @@ class TwpGoogleContactsAccount(models.Model):
                          or self._google_wins(link, partner, g, person))]
         if take:
             partner.write(self._partner_vals(google, take, partner))
-        if self._take_photo(link, partner, person, fill) or take or labelled:
+        photo = self._take_photo(link, partner, person, fill)
+        if photo or take or labelled:
             counts["changed_from_google"] += 1
+            self._note_changes(partner, take + ["photo"] * bool(photo) + ["tags"] * bool(labelled))
         after = self._values(partner)
         new_pushed = dict(pushed)
         for group in synced:
@@ -1409,6 +1438,8 @@ class TwpGoogleContactsAccount(models.Model):
         })
         self._take_photo(link, partner.with_context(**{FROM_GOOGLE: True}), person)
         self._write_anchor(link, self._masked(after, pushed))
+        self._note(partner, self.env._("Added to Odoo from the Google Contacts of %(email)s.",
+                                       email=self.google_email))
         return partner
 
     def _review(self, candidates, decision):
@@ -1459,6 +1490,9 @@ class TwpGoogleContactsAccount(models.Model):
                 else:
                     link = Link.create(dict(values, account_id=self.id, partner_id=partner.id))
                 self._take_changes(link, person, Counter(), first=True)
+                self._note(partner, self.env._(
+                    "Linked to its contact in the Google Contacts of %(email)s, from the review "
+                    "list.", email=self.google_email))
             else:
                 self._create_from_google(person)
             candidate.state = "done"

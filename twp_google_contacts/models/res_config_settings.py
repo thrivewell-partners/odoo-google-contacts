@@ -67,7 +67,7 @@ class ResConfigSettings(models.TransientModel):
              "see it. The label is how a user keeps personal contacts out of Odoo.")
     twp_google_contacts_sync_organization = fields.Boolean(string="Company and job title")
     twp_google_contacts_sync_email = fields.Boolean(string="Email")
-    twp_google_contacts_sync_phone = fields.Boolean(string="Phone")
+    twp_google_contacts_sync_phone = fields.Boolean(string="Phone number")
     twp_google_contacts_sync_address = fields.Boolean(string="Address")
     twp_google_contacts_sync_website = fields.Boolean(string="Website")
     twp_google_contacts_sync_note = fields.Boolean(string="Notes")
