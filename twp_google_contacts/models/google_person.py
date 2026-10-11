@@ -174,6 +174,29 @@ def _pick(items, ours, preferred=None):
     return items[0] if items else None
 
 
+def same_value(group, a, b):
+    """Whether two values of a group say the same thing, written however each side writes it.
+    Addresses need Odoo's country and state names, so the account compares those."""
+    if a is None or b is None:
+        return a is b
+    if group == "name":
+        return " ".join(filter(None, (a.get("givenName"), a.get("familyName")))) == " ".join(
+            filter(None, (b.get("givenName"), b.get("familyName"))))
+    same = {"email": _same_text, "phone": _same_phone, "website": _same_url}.get(group)
+    if same:
+        return same(a, b)
+    if group == "note":
+        return a.strip() == b.strip()
+    if group == "organization":
+        # Odoo joins a company by its name ignoring case, so case is not a difference.
+        return (_lower(a.get("name")), a.get("title")) == (_lower(b.get("name")), b.get("title"))
+    return a == b
+
+
+def _lower(text):
+    return (text or "").strip().lower() or None
+
+
 def changed_groups(values, pushed):
     return [group for group in GROUPS if values.get(group) != (pushed or {}).get(group)]
 
@@ -253,7 +276,7 @@ def _ours_organization(item, old):
     if old is None:
         return False
     if old.get("name"):
-        return (item.get("name") or None) == old["name"]
+        return _lower(item.get("name")) == _lower(old["name"])
     return bool(old.get("title")) and (item.get("title") or None) == old["title"]
 
 

@@ -102,9 +102,40 @@ class TestPull(SyncCase, TransactionCase):
         self.sync()
         grace = self.Partner.search([("email", "=", "grace@navy.example")])
         self.assertEqual(grace.parent_id, self.engines)
+        # Google's own spelling of the company is kept, not joined by a second one.
+        resource = self.link(grace).resource_name
+        self.assertEqual(self.google.people[resource]["organizations"],
+                         [{"name": "lovelace engines", "title": "Admiral"}])
         works = self.Partner.search([("name", "=", "Bletchley Works"), ("is_company", "=", True)])
         self.assertEqual(len(works), 1)
         self.assertEqual(len(works.child_ids), 2)
+
+    def test_what_odoo_adds_to_a_contact_from_google_goes_to_google(self):
+        self.account.sudo().import_reviewed = True
+        self.engines.write({"street": "1 Engine Row", "city": "Indianapolis", "zip": "46204"})
+        resource = self.grace(organizations=[{"name": "Lovelace Engines"}])
+        self.sync()
+        grace = self.Partner.search([("email", "=", "grace@navy.example")])
+        self.assertEqual(grace.street, "1 Engine Row")  # Odoo gives people their company's address
+        self.assertEqual([a.get("streetAddress") for a in self.google.people[resource]["addresses"]],
+                         ["1 Engine Row"])
+        self.google.writes.clear()
+        self.sync()
+        self.assertEqual(self.google.writes, [])
+        self.assertEqual(grace.street, "1 Engine Row")
+
+    def test_an_address_google_writes_its_own_way_is_not_a_change(self):
+        indiana = self.env.ref("base.state_us_in")
+        self.ada.write({"street": "1 Main St", "city": "Indianapolis", "zip": "46204",
+                        "state_id": indiana.id, "country_id": indiana.country_id.id})
+        self.sync()
+        resource = self.link(self.ada).resource_name
+        self.google.change(resource, addresses=[{
+            "streetAddress": "1 Main St", "city": "Indianapolis", "region": "IN",
+            "postalCode": "46204", "country": "United States", "type": "work"}])
+        written = self.ada.write_date
+        self.assertEqual(self.sync()["message"], "Nothing to change")
+        self.assertEqual(self.ada.write_date, written)
 
     def test_kept_out_is_not_asked_again(self):
         self.grace()

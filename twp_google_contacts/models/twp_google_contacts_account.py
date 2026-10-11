@@ -720,6 +720,11 @@ class TwpGoogleContactsAccount(models.Model):
         partner = link.partner_id.with_user(self.user_id).with_context(**{FROM_GOOGLE: True})
         pushed = link.pushed or {}
         google = google_person.google_values(person, pushed)
+        for group in google_person.GROUPS:
+            # Google writes some values its own way, such as "IN" for Indiana: not a change.
+            if google[group] != pushed.get(group) and self._same_value(
+                    group, google[group], pushed.get(group)):
+                google[group] = pushed[group]
         odoo = google_person.partner_values(partner, html2plaintext)
         if first:
             take = [g for g in google_person.GROUPS if odoo[g] is None and google[g] is not None]
@@ -735,16 +740,22 @@ class TwpGoogleContactsAccount(models.Model):
         after = google_person.partner_values(partner, html2plaintext)
         new_pushed = dict(pushed)
         for group in google_person.GROUPS:
-            if group in take or (not first and after[group] == google[group]):
+            same = self._same_value(group, after[group], google[group])
+            if group in take or (not first and same):
                 new_pushed[group] = after[group]
             elif first:
-                new_pushed[group] = after[group] if after[group] == google[group] else None
+                new_pushed[group] = after[group] if same else None
         link.write({"pushed": new_pushed, "etag": person.get("etag"),
                     "google_hash": google_person.person_hash(person),
                     "synced_at": fields.Datetime.now()})
         if first:
             db_uuid = self.env["ir.config_parameter"].sudo().get_param("database.uuid")
             self._update_contact(link, after, google_person.anchor(db_uuid, partner.id))
+
+    def _same_value(self, group, a, b):
+        if group != "address" or a is None or b is None:
+            return google_person.same_value(group, a, b)
+        return self._address_vals(a) == self._address_vals(b)
 
     def _google_wins(self, link, partner, group, person):
         """Whether Google's value stands for a group both sides changed."""
@@ -872,7 +883,9 @@ class TwpGoogleContactsAccount(models.Model):
         values["category_id"] = [Command.set(labels.category_id.ids)]
         params = self.env["ir.config_parameter"].sudo()
         partner = self.env["res.partner"].with_user(self.user_id).create(values)
-        pushed = google_person.partner_values(partner, html2plaintext)
+        after = google_person.partner_values(partner, html2plaintext)
+        pushed = {group: after[group] if self._same_value(group, after[group], google[group])
+                  else None for group in google_person.GROUPS}
         link = self.env["twp.google.contacts.link"].sudo().create({
             "account_id": self.id,
             "partner_id": partner.id,
@@ -886,7 +899,7 @@ class TwpGoogleContactsAccount(models.Model):
         })
         self._take_photo(link, partner.with_context(**{FROM_GOOGLE: True}), person)
         db_uuid = params.get_param("database.uuid")
-        self._update_contact(link, pushed, google_person.anchor(db_uuid, partner.id))
+        self._update_contact(link, after, google_person.anchor(db_uuid, partner.id))
         return partner
 
     def _review(self, candidates, decision):
