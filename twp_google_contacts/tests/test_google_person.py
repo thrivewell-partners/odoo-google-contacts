@@ -112,3 +112,8 @@ class TestGooglePerson(BaseCase):
         self.assertEqual(gp.with_anchor({"clientData": mine}, "odoo:ours:res.partner:10")[-1],
                          {"key": "thrivewell.anchor", "value": "odoo:ours:res.partner:10"})
         self.assertEqual(len(gp.with_anchor({"clientData": mine}, "odoo:ours:res.partner:10")), 3)
+
+    def test_notes_differ_in_words_not_in_blank_lines(self):
+        # Odoo's paragraphs come back from HTML one line apart; Google keeps a blank line.
+        self.assertTrue(gp.same_value("note", "Pair with Emery\n\nDuplicate", "Pair with Emery\nDuplicate"))
+        self.assertFalse(gp.same_value("note", "Pair with Emery\nDuplicate", "Pair with Emery Duplicate"))

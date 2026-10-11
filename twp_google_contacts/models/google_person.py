@@ -201,11 +201,17 @@ def same_value(group, a, b):
     if same:
         return same(a, b)
     if group == "note":
-        return a.strip() == b.strip()
+        return _note_lines(a) == _note_lines(b)
     if group == "organization":
         # Odoo joins a company by its name ignoring case, so case is not a difference.
         return (_lower(a.get("name")), a.get("title")) == (_lower(b.get("name")), b.get("title"))
     return a == b
+
+
+def _note_lines(text):
+    """A note's lines without the blank ones: Odoo's paragraphs come back from HTML one line
+    apart, Google's with a blank line between."""
+    return [line.strip() for line in text.splitlines() if line.strip()]
 
 
 def _lower(text):
