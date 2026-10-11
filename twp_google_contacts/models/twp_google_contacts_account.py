@@ -669,14 +669,8 @@ class TwpGoogleContactsAccount(models.Model):
         if "organization" in groups:
             organization = google["organization"] or {}
             vals["function"] = organization.get("title") or False
-            # A company is joined only when Odoo already has one by that name. Odoo does not
-            # create companies from Google.
-            company = organization.get("name") and self.env["res.partner"].with_user(
-                self.user_id).search([("is_company", "=", True),
-                                      ("name", "=ilike", escape_psql(organization["name"]))],
-                                     limit=1)
-            if company:
-                vals["parent_id"] = company.id
+            if organization.get("name"):
+                vals["parent_id"] = self._company_named(organization["name"]).id
         for group in ("email", "phone", "website"):
             if group in groups:
                 vals[group] = google[group] or False
@@ -685,6 +679,15 @@ class TwpGoogleContactsAccount(models.Model):
         if "note" in groups:
             vals["comment"] = plaintext2html(google["note"]) if google["note"] else False
         return vals
+
+    def _company_named(self, name):
+        """The Odoo company of that name, ignoring case, or a new one when Odoo has none
+        (Tyler's decision, 2026-10-11)."""
+        Partner = self.env["res.partner"].with_user(self.user_id)
+        name = name.strip()
+        company = Partner.search([("is_company", "=", True),
+                                  ("name", "=ilike", escape_psql(name))], limit=1)
+        return company or Partner.create({"name": name, "is_company": True})
 
     def _address_vals(self, address):
         address = address or {}

@@ -114,7 +114,9 @@ class TestPull(GoogleContactsCase, TransactionCase):
         self.Candidate.action_link()  # Accept, with nothing selected: every one to review
         partner = self.link(self.Partner.search([("email", "=", "grace@navy.example")])).partner_id
         self.assertEqual(partner.name, "Grace Hopper")
-        self.assertEqual((partner.function, partner.parent_id.id), ("Admiral", False))
+        # A company Odoo did not have is made, once.
+        self.assertEqual((partner.function, partner.parent_id.name, partner.parent_id.is_company),
+                         ("Admiral", "Unknown Navy", True))
         self.assertEqual((partner.street, partner.city, partner.zip, partner.state_id.code,
                           partner.country_id.code), ("1 Pier Rd", "Arlington", "22201", "VA", "US"))
         self.assertIn("first compiler", partner.comment)
@@ -134,6 +136,20 @@ class TestPull(GoogleContactsCase, TransactionCase):
         hopper.email = "grace@hopper.example"
         self.sync()
         self.assertEqual(self.google.emails(resource)[0], "grace@hopper.example")
+
+    def test_a_company_odoo_has_is_joined_not_doubled(self):
+        self.account.sudo().import_reviewed = True
+        self.grace(organizations=[{"name": "lovelace engines", "title": "Admiral"}])
+        self.google.add(labels=["contactGroups/odoo"], names=[{"givenName": "Alan"}],
+                        organizations=[{"name": "Bletchley Works"}])
+        self.google.add(labels=["contactGroups/odoo"], names=[{"givenName": "Joan"}],
+                        organizations=[{"name": "Bletchley Works"}])
+        self.sync()
+        grace = self.Partner.search([("email", "=", "grace@navy.example")])
+        self.assertEqual(grace.parent_id, self.engines)
+        works = self.Partner.search([("name", "=", "Bletchley Works"), ("is_company", "=", True)])
+        self.assertEqual(len(works), 1)
+        self.assertEqual(len(works.child_ids), 2)
 
     def test_kept_out_is_not_asked_again(self):
         self.grace()
