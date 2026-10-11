@@ -277,11 +277,14 @@ class TestOwnership(SyncCase, TransactionCase):
 class TestDetails(SyncCase, TransactionCase):
     """M5: Settings leave chosen details out of the sync."""
 
-    def leave_out(self, *details):
+    def leave_out(self, *details, on=True):
         settings = self.env["res.config.settings"].create({})
         for detail in details:
-            settings["twp_google_contacts_sync_" + detail] = False
+            settings["twp_google_contacts_sync_" + detail] = not on
         settings.execute()
+
+    def turn_on(self, *details):
+        self.leave_out(*details, on=False)
 
     def test_settings_show_every_detail_on_by_default(self):
         settings = self.env["res.config.settings"].create({})
@@ -310,7 +313,7 @@ class TestDetails(SyncCase, TransactionCase):
         self.ada.comment = "<p>Now shared</p>"
         self.sync()
         resource = self.link(self.ada).resource_name
-        self.leave_out()
+        self.turn_on("note")
         self.sync()
         self.assertEqual(self.google.people[resource]["biographies"][0]["value"], "Now shared")
 
