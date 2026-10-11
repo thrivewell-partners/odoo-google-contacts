@@ -56,6 +56,12 @@ class ResUsers(models.Model):
             return {"type": "ir.actions.client", "tag": "soft_reload"}
         return account.action_check()
 
+    def action_google_contacts_sync(self):
+        account = self._google_contacts_account()
+        if not account:
+            return {"type": "ir.actions.client", "tag": "soft_reload"}
+        return account.action_sync_now()
+
     def action_google_contacts_disconnect(self):
         account = self._google_contacts_account()
         if account:

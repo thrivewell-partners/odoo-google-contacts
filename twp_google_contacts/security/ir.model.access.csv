@@ -1,3 +1,5 @@
 id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
 access_twp_google_contacts_account_system,twp.google.contacts.account system,model_twp_google_contacts_account,base.group_system,1,0,0,0
 access_twp_google_contacts_connect_user,twp.google.contacts.connect user,model_twp_google_contacts_connect,base.group_user,1,1,1,0
+access_twp_google_contacts_link_system,twp.google.contacts.link system,model_twp_google_contacts_link,base.group_system,1,0,0,0
+access_twp_google_contacts_label_system,twp.google.contacts.label system,model_twp_google_contacts_label,base.group_system,1,0,0,0

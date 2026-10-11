@@ -8,6 +8,7 @@
     "depends": ["base_setup"],
     "data": [
         "security/ir.model.access.csv",
+        "data/ir_cron.xml",
         "views/twp_google_contacts_account_views.xml",
         "views/res_config_settings_views.xml",
         "views/res_users_views.xml",

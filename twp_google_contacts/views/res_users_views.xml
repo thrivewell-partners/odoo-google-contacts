@@ -18,8 +18,11 @@
                         <button name="action_google_contacts_connect" type="object"
                                 string="Connect" class="btn-primary"
                                 invisible="google_contacts_state == 'connected'"/>
+                        <button name="action_google_contacts_sync" type="object"
+                                string="Sync now" class="btn-primary"
+                                invisible="google_contacts_state != 'connected'"/>
                         <button name="action_google_contacts_check" type="object"
-                                string="Check connection" class="btn-secondary"
+                                string="Check connection" class="btn-secondary ms-2"
                                 invisible="google_contacts_state != 'connected'"/>
                         <button name="action_google_contacts_disconnect" type="object"
                                 string="Disconnect" class="btn-secondary ms-2"

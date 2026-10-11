@@ -17,6 +17,22 @@
                             <label for="twp_google_contacts_broker_url" class="col-lg-4 o_light_label"/>
                             <field name="twp_google_contacts_broker_url"/>
                         </div>
+                        <div class="row mt8">
+                            <label for="twp_google_contacts_scope" class="col-lg-4 o_light_label"/>
+                            <field name="twp_google_contacts_scope"/>
+                        </div>
+                        <div class="row" invisible="twp_google_contacts_scope != 'tagged'">
+                            <label for="twp_google_contacts_tag_ids" class="col-lg-4 o_light_label"/>
+                            <field name="twp_google_contacts_tag_ids" widget="many2many_tags"/>
+                        </div>
+                        <div class="row">
+                            <label for="twp_google_contacts_label" class="col-lg-4 o_light_label"/>
+                            <field name="twp_google_contacts_label"/>
+                        </div>
+                        <div class="row" groups="base.group_no_one">
+                            <label for="twp_google_contacts_test_database" class="col-lg-4 o_light_label"/>
+                            <field name="twp_google_contacts_test_database"/>
+                        </div>
                         <button name="%(twp_google_contacts_account_action)d" type="action"
                                 string="Connected accounts" icon="oi-arrow-right"
                                 class="btn-link mt8"/>
