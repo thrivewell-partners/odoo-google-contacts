@@ -125,7 +125,8 @@ class TestPull(SyncCase, TransactionCase):
         self.assertEqual(grace.street, "1 Engine Row")
 
     def test_an_address_google_writes_its_own_way_is_not_a_change(self):
-        indiana = self.env.ref("base.state_us_in")
+        indiana = self.env["res.country.state"].search([("code", "=", "IN"),
+                                                        ("country_id.code", "=", "US")])
         self.ada.write({"street": "1 Main St", "city": "Indianapolis", "zip": "46204",
                         "state_id": indiana.id, "country_id": indiana.country_id.id})
         self.sync()
