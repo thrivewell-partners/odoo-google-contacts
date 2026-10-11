@@ -936,7 +936,8 @@ class TwpGoogleContactsAccount(models.Model):
             # A partner keeps its name when Google's is cleared.
             take = [g for g in takes
                     if google[g] != pushed.get(g) and (google[g] is not None or g != "name")
-                    and (odoo[g] == pushed.get(g) or self._google_wins(link, partner, g, person))]
+                    and (odoo[g] == pushed.get(g) or (g in maps and maps[g].direction == "to_odoo")
+                         or self._google_wins(link, partner, g, person))]
         if take:
             partner.write(self._partner_vals(google, take, partner))
         if self._take_photo(link, partner, person, fill) or take or labelled:

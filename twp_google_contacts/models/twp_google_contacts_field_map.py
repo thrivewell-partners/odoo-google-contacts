@@ -95,9 +95,11 @@ class TwpGoogleContactsFieldMap(models.Model):
         return result
 
     def _maps_changed(self):
-        """Every account compares all of Google again, so a new pairing is settled at once."""
+        """Every account reads all of Google again and compares every contact, even one whose
+        Google side has not changed, so a new pairing is settled on the next sync."""
         self.env.registry.clear_cache()
         self.env["twp.google.contacts.account"].sudo().search([]).write({"sync_token": False})
+        self.env["twp.google.contacts.link"].sudo().search([]).write({"google_hash": False})
 
     @api.model
     @tools.ormcache()
