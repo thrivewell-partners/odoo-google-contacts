@@ -10,6 +10,7 @@ import requests
 
 from odoo import fields
 
+ACCOUNT = "odoo.addons.twp_google_contacts.models.twp_google_contacts_account"
 BROKER = "odoo.addons.twp_google_contacts.models.broker.requests.post"
 GOOGLE = "odoo.addons.twp_google_contacts.models.twp_google_contacts_account.requests.request"
 SLEEP = "odoo.addons.twp_google_contacts.models.twp_google_contacts_account.time.sleep"
@@ -78,14 +79,20 @@ class GoogleContactsCase:
         params = cls.env["ir.config_parameter"].sudo()
         params.set_param("twp_google_contacts.broker_url", "http://connect.test")
         params.set_param("twp_google_contacts.broker_key", "twc_test")
+        # Writes are not spaced out in tests, and new contacts are made one at a time unless a
+        # test asks for batches.
+        params.set_param("twp_google_contacts.write_gap", "0")
+        params.set_param("twp_google_contacts.batch_from", "100000")
         cls.Account = cls.env["twp.google.contacts.account"]
 
     def setUp(self):
         super().setUp()
         self.broker = FakeBroker()
-        patcher = patch(BROKER, self.broker)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for target, value in ((BROKER, self.broker),
+                              (ACCOUNT + ".TwpGoogleContactsAccount._rollback", lambda s: None)):
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def connect(self, user=None):
         Account = self.Account.with_user(user) if user else self.Account
@@ -115,6 +122,9 @@ class FakePeople:
         self.updated = {}  # resource name -> when it last changed, as Google reports it
         self.photos = {}  # resource name -> photo address
         self.photo_bytes = {}  # photo address -> the image
+        self.refuse = {}  # a path, or the end of one -> the answer Google gives it instead
+        self.batches = []  # the size of each batch create
+        self.group_page_size = 1000
 
     def _next(self, prefix):
         self.serial += 1
@@ -132,13 +142,20 @@ class FakePeople:
             return response(200, raw=image) if image else response(404, raw=b"")
         path = url.split("/v1/", 1)[1]
         params = params or {}
+        for key, answer in self.refuse.items():
+            if path == key or path.endswith(key):
+                return answer
         if method != "GET":
             self.writes.append((method, path))
         if path == "people/me/connections":
             return self._connections(params)
         if path == "contactGroups" and method == "GET":
-            return response(200, {"contactGroups": [dict(g, resourceName=r)
-                                                    for r, g in self.groups.items()]})
+            groups = [dict(g, resourceName=r) for r, g in self.groups.items()]
+            start = int(params.get("pageToken") or 0)
+            body = {"contactGroups": groups[start:start + self.group_page_size]}
+            if start + self.group_page_size < len(groups):
+                body["nextPageToken"] = str(start + self.group_page_size)
+            return response(200, body)
         if path == "contactGroups" and method == "POST":
             resource = self._next("contactGroups/g")
             self.groups[resource] = {"name": json["contactGroup"]["name"],
@@ -152,6 +169,17 @@ class FakePeople:
             for resource in json.get("resourceNamesToAdd", []) + json.get("resourceNamesToRemove", []):
                 self._touch(resource)
             return response(200, {})
+        if path == "people:batchCreateContacts":
+            self.batches.append(len(json["contacts"]))
+            created = []
+            for item in reversed(json["contacts"]):  # Google promises no order
+                resource = self._next("people/c")
+                self.people[resource] = dict(copy.deepcopy(item["contactPerson"]),
+                                             resourceName=resource)
+                self._touch(resource)
+                created.append({"httpStatusCode": 200, "requestedResourceName": resource,
+                                "person": self.view(resource)})
+            return response(200, {"createdPeople": created})
         if path == "people:createContact":
             resource = self._next("people/c")
             self.people[resource] = dict(copy.deepcopy(json), resourceName=resource)
@@ -295,9 +323,6 @@ class FakePeople:
 
     def emails(self, resource):
         return [e["value"] for e in self.people[resource].get("emailAddresses", [])]
-
-
-ACCOUNT = "odoo.addons.twp_google_contacts.models.twp_google_contacts_account"
 
 
 class SyncCase(GoogleContactsCase):

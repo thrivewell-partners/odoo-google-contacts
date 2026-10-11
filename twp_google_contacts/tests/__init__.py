@@ -5,3 +5,4 @@ from . import test_pull
 from . import test_push
 from . import test_two_way
 from . import test_choices
+from . import test_hardening

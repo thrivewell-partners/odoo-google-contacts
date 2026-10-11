@@ -80,9 +80,12 @@
                             <label for="twp_google_contacts_test_database" class="col-lg-4 o_light_label"/>
                             <field name="twp_google_contacts_test_database"/>
                         </div>
-                        <button name="%(twp_google_contacts_account_action)d" type="action"
-                                string="Connected accounts" icon="oi-arrow-right"
-                                class="btn-link mt8"/>
+                        <div class="mt8">
+                            <button name="%(twp_google_contacts_account_action)d" type="action"
+                                    string="Connected accounts" icon="oi-arrow-right" class="btn-link"/>
+                            <button name="%(twp_google_contacts_log_action)d" type="action"
+                                    string="Sync log" icon="oi-arrow-right" class="btn-link ms-3"/>
+                        </div>
                     </div>
                 </setting>
             </block>

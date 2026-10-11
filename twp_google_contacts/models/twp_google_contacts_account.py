@@ -9,8 +9,9 @@ from datetime import timedelta
 import requests
 
 from odoo import Command, api, fields, models
+from odoo.addons.base.models.ir_cron import MIN_TIME_PER_JOB
 from odoo.exceptions import AccessError, UserError, ValidationError
-from odoo.tools import escape_psql, html2plaintext, plaintext2html
+from odoo.tools import config, escape_psql, html2plaintext, plaintext2html
 
 from . import broker, google_person
 from .res_config_settings import DEFAULT_LABEL, DETAILS_OFF, DIRECTIONS, OWNERS
@@ -23,7 +24,26 @@ _logger = logging.getLogger(__name__)
 PEOPLE_API = "https://people.googleapis.com/v1/"
 TIMEOUT = 30
 MAX_ATTEMPTS = 5
+# Google's limits run per minute, so a 429 is waited out past a whole minute (1 to 32 s, about
+# 63 s in all) before the sync stops.
+QUOTA_ATTEMPTS = 7
 MAX_WAIT = 60
+# Seconds between two writes for one account, so a large sync stays near 85 writes a minute
+# instead of running into Google's limit. Google publishes no number; it shows only in the
+# Cloud console of the app's project. A parameter of the same name overrides it.
+WRITE_GAP = 0.7
+LAST_WRITE = {}  # (database, account) -> when its last write was sent, by the monotonic clock
+# The share of Odoo's time limit a sync may use before it stops and leaves the rest to the next
+# run, and the time it takes when Odoo sets no limit.
+TIME_SHARE = 0.6
+NO_LIMIT = {"cron": 1800, "request": 120}
+# Google's batch create takes up to 200 contacts, and costs its per-minute limit far less than
+# 200 single calls, but counts against the daily limit as 200 whatever its size. So only this
+# many new contacts or more go in batches. A parameter of the same name overrides it.
+BATCH_SIZE = 200
+BATCH_FROM = 20
+# Google's most adds and removes in one change to a label's members.
+MEMBERS_MAX = 1000
 # A photo Google changed while Odoo's is the one kept: the push puts Odoo's back.
 PUT_BACK = "put-back"
 
@@ -65,6 +85,36 @@ class GoogleApiError(UserError):
         self.reasons = set(reasons)
 
 
+class GoogleQuota(UserError):
+    """Google's limit for this account was still reached after waiting a minute out. The sync
+    stops where it is: what was done is kept, and the rest continues on a later run. `daily` when
+    it is the day's limit."""
+
+    def __init__(self, env, daily=False):
+        super().__init__(env._(
+            "Google's daily limit for this account was reached. What was done is kept; the rest "
+            "continues tomorrow.") if daily else env._(
+            "Google asked Odoo to slow down for this account. What was done is kept; the rest "
+            "continues in a few minutes."))
+        self.daily = daily
+
+
+class OutOfTime(Exception):
+    """This run has used its share of Odoo's time limit. What was done is kept; the rest continues
+    on the next run, which Odoo starts straight away."""
+
+
+class Run(Counter):
+    """One sync: what it changed, by kind, the contacts that failed, and how it ended."""
+
+    def __init__(self):
+        super().__init__()
+        self.failures = []
+        self.outcome = "done"
+        self.message = None
+        self.daily = False
+
+
 class TwpGoogleContactsAccount(models.Model):
     _name = "twp.google.contacts.account"
     _description = "Connected Google Contacts account"
@@ -92,6 +142,11 @@ class TwpGoogleContactsAccount(models.Model):
                               help="The fields the sync token was asked for. Asking for other "
                                    "fields needs a full read")
     last_full_sync = fields.Datetime(readonly=True)
+    next_sync = fields.Datetime(
+        readonly=True, help="When the scheduled sync takes this account next. A run cut short by "
+                            "Odoo's time limit continues straight away, and one Google slowed "
+                            "down a few minutes later.")
+    log_ids = fields.One2many("twp.google.contacts.log", "account_id")
     import_reviewed = fields.Boolean(
         readonly=True,
         help="The user has reviewed the first import. From then on, Google contacts under the "
@@ -184,6 +239,31 @@ class TwpGoogleContactsAccount(models.Model):
         self._release_connection()
         self.sudo().unlink()
 
+    @api.model
+    def _uninstall(self):
+        """Before Odoo removes the module: give every Google connection back to ThriveWell
+        Connect, which revokes it at Google, then remove the module's settings, the key among
+        them. Odoo drops the module's tables itself, and with them the access tokens, links,
+        labels, review list, hashed index and log.
+
+        A copy of a database does not give connections back, because they are the original's. A
+        key ThriveWell no longer accepts has no connections to give back. When ThriveWell Connect
+        cannot be reached, the uninstall stops, so no Google access is left behind."""
+        params = self.env["ir.config_parameter"].sudo()
+        copy = (params.get_param("database.is_neutralized")
+                and not params.get_param("twp_google_contacts.test_database"))
+        accounts = self.sudo().search([])
+        if accounts and params.get_param("twp_google_contacts.broker_key") and not copy:
+            try:
+                accounts._release_connection()
+            except broker.BrokerKeyRefused:
+                _logger.info("Google Contacts: key refused at uninstall; nothing to give back")
+            except UserError as e:
+                raise UserError(self.env._(
+                    "Google Contacts was not uninstalled, because its Google connections could "
+                    "not be given back: %(error)s", error=e.args[0])) from None
+        params.search([("key", "=like", "twp_google_contacts.%")]).unlink()
+
     # One-hour access tokens.
 
     def _get_access_token(self):
@@ -220,9 +300,11 @@ class TwpGoogleContactsAccount(models.Model):
     def _google_request(self, method, path, params=None, json=None):
         """Call the People API for this account and return the decoded answer.
 
-        Retries a lapsed token once, and waits out 429 and 5xx answers with exponential backoff.
-        Writes take a lock on the account row first, because Google asks for one write at a time
-        per account; a second write in another worker waits for the first to commit.
+        Retries a lapsed token once, and waits out 5xx answers with exponential backoff. A 429,
+        Google's limit, is waited out past a minute; still refused, the whole sync stops with
+        GoogleQuota, rather than every contact after it failing in turn. Writes are spaced out
+        (`_pace`) and take a lock on the account row first, because Google asks for one write at a
+        time per account; a second write in another worker waits for the first to commit.
         """
         self.ensure_one()
         if method != "GET":
@@ -230,8 +312,10 @@ class TwpGoogleContactsAccount(models.Model):
                 "SELECT id FROM twp_google_contacts_account WHERE id = %s FOR UPDATE", [self.id])
         renewed = False
         response = None
-        for attempt in range(MAX_ATTEMPTS):
+        for attempt in range(QUOTA_ATTEMPTS):
             token = self._get_access_token()
+            if method != "GET":
+                self._pace()
             try:
                 response = requests.request(
                     method, PEOPLE_API + path, params=params, json=json, timeout=TIMEOUT,
@@ -243,10 +327,13 @@ class TwpGoogleContactsAccount(models.Model):
                 renewed = True
                 self.sudo().write({"access_token": False, "access_token_expiry": False})
                 continue
-            if response is None or response.status_code == 429 or response.status_code >= 500:
+            if response is None or response.status_code >= 500:
                 if attempt + 1 < MAX_ATTEMPTS:
                     time.sleep(self._backoff(attempt, response))
                     continue
+            elif response.status_code == 429 and attempt + 1 < QUOTA_ATTEMPTS:
+                time.sleep(self._backoff(attempt, response))
+                continue
             break
         if response is None:
             raise UserError(self.env._(
@@ -258,7 +345,12 @@ class TwpGoogleContactsAccount(models.Model):
         if response.status_code < 400:
             return body
         error = body.get("error") if isinstance(body.get("error"), dict) else {}
-        reasons = {d.get("reason") for d in error.get("details", []) if isinstance(d, dict)}
+        details = [d for d in error.get("details", []) if isinstance(d, dict)]
+        reasons = {d.get("reason") for d in details}
+        if response.status_code == 429:
+            limits = " ".join(str((d.get("metadata") or {}).get(key, "")) for d in details
+                              for key in ("quota_limit", "quota_metric"))
+            raise GoogleQuota(self.env, daily="day" in limits.lower())
         if response.status_code in (401, 403) and (
                 response.status_code == 401 or "ACCESS_TOKEN_SCOPE_INSUFFICIENT" in reasons):
             # The token no longer carries the Contacts permission.
@@ -267,6 +359,17 @@ class TwpGoogleContactsAccount(models.Model):
             raise GoogleReconnect(self.env, "reconnect")
         raise GoogleApiError(self.env, response.status_code, error.get("status"),
                              error.get("message") or "HTTP %s" % response.status_code, reasons)
+
+    def _pace(self):
+        """Wait until this account's last write is far enough behind, so a large sync keeps under
+        Google's per-minute limit instead of running into it."""
+        gap = float(self.env["ir.config_parameter"].sudo().get_param(
+            "twp_google_contacts.write_gap") or WRITE_GAP)
+        key = (self.env.cr.dbname, self.id)
+        wait = LAST_WRITE.get(key, 0) + gap - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        LAST_WRITE[key] = time.monotonic()
 
     @staticmethod
     def _backoff(attempt, response):
@@ -286,6 +389,26 @@ class TwpGoogleContactsAccount(models.Model):
                 "contacts of the database it was copied from. If every connected Google account is "
                 "a test account, an administrator can turn on \"Sync from this copy\" in "
                 "Settings."))
+
+    @api.model
+    def _deadline(self):
+        """When this run stops to stay inside Odoo's time limit: a share of the limit, counted from
+        the start of the scheduled job, or from now for a button."""
+        context = self.env.context
+        if context.get("twp_deadline"):
+            return context["twp_deadline"]
+        if "cron_end_time" in context:
+            kind, start = "cron", context["cron_end_time"] - MIN_TIME_PER_JOB
+            limit = config.get("limit_time_real_cron")
+            if limit is None or limit < 0:
+                limit = config.get("limit_time_real")
+        else:
+            kind, start, limit = "request", time.monotonic(), config.get("limit_time_real")
+        limit = limit if limit and limit > 0 else NO_LIMIT[kind] / TIME_SHARE
+        return start + limit * TIME_SHARE
+
+    def _out_of_time(self):
+        return time.monotonic() > self.env.context.get("twp_deadline", float("inf"))
 
     def _synced_groups(self):
         """The groups that sync: per Settings, the name always and the rest unless left out,
@@ -365,21 +488,83 @@ class TwpGoogleContactsAccount(models.Model):
         domain.append(("id", "not in", colleagues.ids))
         return (Partner.search(domain) | linked).sudo()
 
-    def _sync(self):
-        """Pull Google's changes into Odoo, then push Odoo's to Google, and record the result.
-        Pulling first means a change made in Google is in Odoo before Odoo sends its own."""
+    def _sync(self, trigger="manual"):
+        """Pull Google's changes into Odoo, then push Odoo's to Google, and record the run on the
+        account and in the sync log. Pulling first means a change made in Google is in Odoo before
+        Odoo sends its own.
+
+        Returns the Run, which says how it ended; it does not raise. A run cut short by the time
+        limit or by Google's limit keeps what it did, and the scheduled sync takes up the rest."""
         self.ensure_one()
-        self._check_may_sync()
-        for key in ("twp_google_contacts_labels", "twp_google_contacts_maps"):
-            self.env.cr.cache.get(key, {}).pop(self.id, None)
-        account = self.sudo()
-        counts = Counter()
-        account._pull(counts)
-        account._push(counts)
-        account.write({"last_sync": fields.Datetime.now(),
-                       "last_sync_result": account._describe(counts)})
+        run = Run()
+        started, clock = fields.Datetime.now(), time.monotonic()
+        account = self.sudo().with_context(twp_deadline=self._deadline())
+        try:
+            self._check_may_sync()
+            for key in ("twp_google_contacts_labels", "twp_google_contacts_maps"):
+                self.env.cr.cache.get(key, {}).pop(self.id, None)
+            account._pull(run)
+            account._push(run)
+        except GoogleReconnect as e:
+            # The state was written in a step that has since rolled back: write it again.
+            account.write({"state": e.state, "access_token": False, "access_token_expiry": False})
+            run.outcome, run.message = e.state, e.args[0]
+        except GoogleQuota as e:
+            run.outcome, run.message, run.daily = "quota", e.args[0], e.daily
+        except OutOfTime:
+            run.outcome = "partial"
+        except UserError as e:
+            run.outcome, run.message = "failed", e.args[0]
+        except Exception:
+            _logger.exception("Google Contacts: sync of account %s failed", self.id)
+            self._rollback()
+            run.outcome, run.message = "failed", self.env._(
+                "Something unexpected went wrong. What was done before it is kept. The server log "
+                "has the details for ThriveWell.")
+        account._record(run, trigger, started, time.monotonic() - clock)
+        return run
+
+    def _record(self, run, trigger, started, duration):
+        """Write the run on the account and in the sync log, and say when the account is due
+        again: straight away when the time ran out, a few minutes later when Google slowed it
+        down, otherwise after half the scheduled interval, so each scheduled run takes it."""
+        now = fields.Datetime.now()
+        cron = self.env.ref("twp_google_contacts.ir_cron_sync", raise_if_not_found=False)
+        if run.outcome == "partial":
+            next_sync = now
+            message = self.env._("%(done)s. The rest continues in the background.",
+                                 done=self._describe(run))
+        elif run.outcome == "quota":
+            next_sync = now + (timedelta(hours=6) if run.daily else timedelta(minutes=5))
+            message = run.message
+        else:
+            interval = timedelta(hours=1)
+            if cron:
+                interval = timedelta(**{cron.interval_type: cron.interval_number}) if (
+                    cron.interval_type in ("minutes", "hours", "days", "weeks")) else (
+                    timedelta(days=30 * cron.interval_number))
+            next_sync = now + interval / 2
+            message = run.message or self._describe(run)
+        self.write({"last_sync": now, "last_sync_result": message, "next_sync": next_sync})
+        if cron and run.outcome in ("partial", "quota"):
+            cron._trigger(at=next_sync)
+        self.env["twp.google.contacts.log"].sudo()._record(self, run, trigger, started, duration,
+                                                           message)
         self._commit_step()
-        return counts
+
+    def _rollback(self):
+        self.env.cr.rollback()
+
+    def _failed(self, counts, error, partner=None, resource=None):
+        """One contact, or one label, that did not sync: counted, kept for the log, and logged."""
+        counts["failed"] += 1
+        if isinstance(counts, Run):
+            counts.failures.append({"partner_id": partner.id if partner else False,
+                                    "resource_name": resource or False,
+                                    "message": str(error.args[0] if error.args else error)[:1000]})
+        _logger.warning("Google Contacts: %s not synced for account %s: %s",
+                        resource or "partner %s" % (partner.id if partner else "?"), self.id,
+                        getattr(error, "google_status", None) or type(error).__name__)
 
     def _push(self, counts):
         """Send this account's partners to Google: create what is new, merge what changed in
@@ -405,7 +590,13 @@ class TwpGoogleContactsAccount(models.Model):
         photos = account._photo_sums(partners)
         reviewing = account.candidate_ids.filtered(
             lambda c: c.kind == "import" and c.state == "pending").match_id
+        queue = []  # new contacts, made after the loop: one at a time, or in batches when many
         for partner in partners:
+            if account._out_of_time():
+                account._create_contacts(queue, db_uuid, photos, counts, main, tag_labels,
+                                         label_changes)
+                account._apply_labels(label_changes, counts)
+                raise OutOfTime()
             link = links.get(partner.id)
             if link and link.state in STOPPED:
                 # Deleted or merged away in Google. Never re-created without asking (proof 6).
@@ -419,9 +610,8 @@ class TwpGoogleContactsAccount(models.Model):
                     link = account._link_twin(partner, twin, counts)
                     account._push_photo(link, partner, photos.get(partner.id))
                 elif not link:
-                    link = account._create_contact(partner, values, db_uuid)
-                    counts["created"] += 1
-                    account._push_photo(link, partner, photos.get(partner.id))
+                    queue.append((partner, values))
+                    continue
                 else:
                     updated = (google_person.changed_groups(values, link.pushed)
                                and account._update_contact(link, values))
@@ -430,16 +620,12 @@ class TwpGoogleContactsAccount(models.Model):
                         updated = True
                     counts["updated"] += bool(updated)
             except GoogleApiError as e:
-                counts["failed"] += 1
-                _logger.warning("Google Contacts: partner %s not synced for account %s: %s %s",
-                                partner.id, account.id, e.status, e.google_status)
+                account._failed(counts, e, partner=partner)
                 continue
-            wanted = sorted({main} | {tag_labels[tag.id] for tag in partner.category_id
-                                      if tag.id in tag_labels})
-            if link.state == "active" and wanted != (link.label_resource_names or []):
-                label_changes.append((link, wanted))
+            account._want_labels(link, partner, main, tag_labels, label_changes)
             self._commit_step()
-        account._apply_labels(label_changes)
+        account._create_contacts(queue, db_uuid, photos, counts, main, tag_labels, label_changes)
+        account._apply_labels(label_changes, counts)
         # A partner deleted in Odoo: once out of Odoo's labels, its link has nothing left to do.
         account.link_ids.filtered(lambda l: not l.partner_id and (
             l.state in STOPPED or not l.label_resource_names)).unlink()
@@ -465,6 +651,8 @@ class TwpGoogleContactsAccount(models.Model):
                 if link.partner_id:
                     link.state = hold
             elif link.state in HELD:
+                if self._out_of_time():
+                    continue  # taken up again on the next run
                 try:
                     person = self._get_person(link.resource_name)
                 except GoogleApiError as e:
@@ -511,16 +699,86 @@ class TwpGoogleContactsAccount(models.Model):
                     "etag": person.get("etag") or link.etag})
         return bool(result)
 
-    def _create_contact(self, partner, values, db_uuid):
+    def _want_labels(self, link, partner, main, tag_labels, label_changes):
+        """Note the labels the partner's contact should be in, when they are not the ones it is."""
+        wanted = sorted({main} | {tag_labels[tag.id] for tag in partner.category_id
+                                  if tag.id in tag_labels})
+        if link.state == "active" and wanted != (link.label_resource_names or []):
+            label_changes.append((link, wanted))
+
+    def _create_contacts(self, queue, db_uuid, photos, counts, main, tag_labels, label_changes):
+        """Create the queued partners' contacts in Google, then send their photos and note their
+        labels. Fewer than BATCH_FROM go one call each; more go in batches of 200. A batch Google
+        refuses is sent again one at a time, so a bad contact fails alone."""
+        batch_from = int(self.env["ir.config_parameter"].sudo().get_param(
+            "twp_google_contacts.batch_from") or BATCH_FROM)
+        chunks = ([queue[i:i + BATCH_SIZE] for i in range(0, len(queue), BATCH_SIZE)]
+                  if len(queue) >= batch_from else [])
+        singles = [] if chunks else list(queue)
+        for chunk in chunks:
+            try:
+                created = self._batch_create(chunk, db_uuid)
+            except GoogleApiError as e:
+                _logger.info("Google Contacts: a batch of %s refused for account %s (%s); sending "
+                             "them one at a time", len(chunk), self.id, e.google_status)
+                singles += chunk
+                continue
+            for partner, values in chunk:
+                person = created.get(partner.id)
+                if person:
+                    self._made(partner, values, person, photos, counts, main, tag_labels,
+                               label_changes)
+                else:
+                    singles.append((partner, values))
+            self._commit_step()
+        for partner, values in singles:
+            try:
+                person = self._google_request(
+                    "POST", "people:createContact",
+                    params={"personFields": google_person.PERSON_FIELDS},
+                    json=self._new_person(partner, values, db_uuid))
+                self._made(partner, values, person, photos, counts, main, tag_labels,
+                           label_changes)
+            except GoogleApiError as e:
+                self._failed(counts, e, partner=partner)
+            self._commit_step()
+        queue.clear()
+
+    def _batch_create(self, chunk, db_uuid):
+        """Create up to 200 contacts in one call. Returns each new person by the partner id in its
+        anchor, which does not depend on the order Google answers in."""
+        body = self._google_request("POST", "people:batchCreateContacts", json={
+            "contacts": [{"contactPerson": self._new_person(partner, values, db_uuid)}
+                         for partner, values in chunk],
+            "readMask": google_person.PERSON_FIELDS,
+            "sources": ["READ_SOURCE_TYPE_CONTACT"]})
+        created = {}
+        for answer in body.get("createdPeople", []):
+            person = answer.get("person") or {}
+            partner_id = google_person.anchored_partner_id(person, db_uuid)
+            if partner_id and person.get("resourceName"):
+                created[partner_id] = person
+        return created
+
+    def _made(self, partner, values, person, photos, counts, main, tag_labels, label_changes):
+        link = self._new_link(partner, values, person)
+        counts["created"] += 1
+        try:
+            self._push_photo(link, partner, photos.get(partner.id))
+        except GoogleApiError as e:
+            self._failed(counts, e, partner=partner, resource=link.resource_name)
+        self._want_labels(link, partner, main, tag_labels, label_changes)
+
+    def _new_person(self, partner, values, db_uuid):
         person = google_person.new_person(values, google_person.anchor(db_uuid, partner.id))
         for group, row in self._maps().items():
             if values.get(group) is not None:
                 field = google_person.MAPPED_FIELDS[row.target]
                 person[field] = google_person.merge_mapped(
                     person.get(field, []), row.target, row.google_key, values[group])
-        body = self._google_request("POST", "people:createContact",
-                                    params={"personFields": google_person.PERSON_FIELDS},
-                                    json=person)
+        return person
+
+    def _new_link(self, partner, values, body):
         return self.env["twp.google.contacts.link"].sudo().create({
             "account_id": self.id,
             "partner_id": partner.id,
@@ -721,14 +979,18 @@ class TwpGoogleContactsAccount(models.Model):
         return link
 
     def _step(self, resource, counts, method, *args):
-        """Run one contact's part of a pull on its own, so one bad contact fails alone."""
+        """Run one contact's part of a pull on its own, so one bad contact fails alone. When the
+        time is up, the pull stops without its new sync token, so the next run reads the same
+        changes again and takes up what this one did not reach."""
+        if self._out_of_time():
+            raise OutOfTime()
         try:
             with self.env.cr.savepoint():
                 method(*args)
         except (GoogleApiError, AccessError, ValidationError) as e:
-            counts["failed"] += 1
-            _logger.warning("Google Contacts: %s not taken for account %s: %s",
-                            resource, self.id, e)
+            link = self.env["twp.google.contacts.link"].sudo().search(
+                [("account_id", "=", self.id), ("resource_name", "=", resource)], limit=1)
+            self._failed(counts, e, partner=link.partner_id or None, resource=resource)
         self._commit_step()
 
     def _take_person(self, person, label, counts, waiting):
@@ -1334,8 +1596,14 @@ class TwpGoogleContactsAccount(models.Model):
         """The labels the user made in Google, resource name to name, read once per sync."""
         cache = self.env.cr.cache.setdefault("twp_google_contacts_labels", {})
         if self.id not in cache:
-            groups = self._google_request("GET", "contactGroups", params={
-                "pageSize": 1000, "groupFields": "name,groupType"}).get("contactGroups", [])
+            params = {"pageSize": 1000, "groupFields": "name,groupType"}
+            groups = []
+            while True:
+                body = self._google_request("GET", "contactGroups", params=params)
+                groups += body.get("contactGroups", [])
+                if not body.get("nextPageToken"):
+                    break
+                params = dict(params, pageToken=body["nextPageToken"])
             cache[self.id] = {group["resourceName"]: group.get("name") for group in groups
                               if group.get("groupType") == "USER_CONTACT_GROUP"}
         return cache[self.id]
@@ -1428,9 +1696,10 @@ class TwpGoogleContactsAccount(models.Model):
         self.env["twp.google.contacts.link"].sudo().search(
             [("account_id", "in", accounts.ids)]).write({"google_labels": False})
 
-    def _apply_labels(self, changes):
-        """Add and remove contacts from labels, one call per label. Only labels Odoo put a
-        contact in are ever taken away; the user's own labels are never touched."""
+    def _apply_labels(self, changes, counts=None):
+        """Add and remove contacts from labels, one call per label and per 1000 contacts. Only
+        labels Odoo put a contact in are ever taken away; the user's own labels are never
+        touched."""
         by_label = defaultdict(lambda: {"resourceNamesToAdd": [], "resourceNamesToRemove": []})
         for link, wanted in changes:
             current = set(link.label_resource_names or [])
@@ -1440,13 +1709,14 @@ class TwpGoogleContactsAccount(models.Model):
                 by_label[label]["resourceNamesToRemove"].append(link.resource_name)
         failed = set()
         for label, body in by_label.items():
-            try:
-                self._google_request("POST", label + "/members:modify",
-                                     json={k: v for k, v in body.items() if v})
-            except GoogleApiError as e:
-                failed.add(label)
-                _logger.warning("Google Contacts: label %s not updated for account %s: %s %s",
-                                label, self.id, e.status, e.google_status)
+            calls = [{key: names[i:i + MEMBERS_MAX]}
+                     for key, names in body.items() for i in range(0, len(names), MEMBERS_MAX)]
+            for call in calls:
+                try:
+                    self._google_request("POST", label + "/members:modify", json=call)
+                except GoogleApiError as e:
+                    failed.add(label)
+                    self._failed(Counter() if counts is None else counts, e, resource=label)
         for link, wanted in changes:
             current, wanted = set(link.label_resource_names or []), set(wanted)
             # A label whose call failed keeps its old membership, so the next sync retries it.
@@ -1480,15 +1750,28 @@ class TwpGoogleContactsAccount(models.Model):
 
     @api.model
     def _cron_sync(self):
-        for account in self.sudo().search([("state", "=", "connected")]):
+        """Sync each connected account that is due, longest waiting first, until all are done or
+        the job's time is used up. Accounts left over are reported to Odoo, which runs the job
+        again straight away. An account that fails is logged and the next one goes on, so the job
+        itself never fails and is never switched off by Odoo."""
+        deadline = self._deadline()
+        accounts = self.sudo().search(
+            [("state", "=", "connected"), "|", ("next_sync", "=", False),
+             ("next_sync", "<=", fields.Datetime.now())], order="next_sync, id")
+        left = len(accounts)
+        for account in accounts:
+            if time.monotonic() > deadline:
+                break
             try:
-                account._sync()
-            except GoogleReconnect:
-                pass  # the account's state now says so, and it commits below
-            except UserError as e:
-                _logger.info("Google Contacts: account %s not synced: %s", account.id, e.args[0])
-                account.last_sync_result = e.args[0]
-            self._commit_step()
+                run = account.with_context(twp_deadline=deadline)._sync("cron")
+            except Exception:
+                _logger.exception("Google Contacts: account %s not synced", account.id)
+                self._rollback()
+                run = Run()
+            if run.outcome == "partial":
+                break
+            left -= 1
+        self.env["ir.cron"]._commit_progress(remaining=left)
 
     # Buttons.
 
@@ -1509,14 +1792,26 @@ class TwpGoogleContactsAccount(models.Model):
     def action_sync_now(self):
         """Sync this account now and report. Reports, never raises."""
         self.ensure_one()
-        try:
-            counts = self._sync()
-        except GoogleReconnect as e:
-            return self._notify(e.args[0], "danger")
-        except UserError as e:
-            return self._notify(e.args[0], "warning")
-        kind = "warning" if counts["failed"] or self.review_count else "success"
-        return self._notify(self._describe(counts), kind)
+        run = self._sync()
+        if run.outcome in ("reconnect", "blocked"):
+            kind = "danger"
+        elif run.outcome == "partial":
+            kind = "info"
+        elif run.outcome != "done" or run["failed"] or self.review_count:
+            kind = "warning"
+        else:
+            kind = "success"
+        return self._notify(self.last_sync_result, kind)
+
+    def action_log(self):
+        self.ensure_one()
+        return {
+            "type": "ir.actions.act_window",
+            "name": self.env._("Sync log: %(email)s", email=self.google_email),
+            "res_model": "twp.google.contacts.log",
+            "view_mode": "list,form",
+            "domain": [("account_id", "=", self.id)],
+        }
 
     def action_review(self):
         self.ensure_one()

@@ -16,6 +16,10 @@ DEFAULT_URL = "https://connect.thrivewellag.com"
 TIMEOUT = 20
 
 
+class BrokerKeyRefused(UserError):
+    """ThriveWell Connect does not accept this database's key."""
+
+
 class BrokerError(Exception):
     """ThriveWell Connect answered with an error the caller is expected to handle."""
 
@@ -52,7 +56,7 @@ def call(env, path, payload):
     except ValueError:
         body = {}
     if response.status_code == 401:
-        raise UserError(env._(
+        raise BrokerKeyRefused(env._(
             "ThriveWell Connect refused this database's key. An administrator needs to check the "
             "key in Settings."))
     if response.status_code != 200:

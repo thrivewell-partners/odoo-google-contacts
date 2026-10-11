@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="twp_google_contacts_log_view_list" model="ir.ui.view">
+        <field name="name">twp.google.contacts.log.list</field>
+        <field name="model">twp.google.contacts.log</field>
+        <field name="arch" type="xml">
+            <list string="Sync log" create="0" edit="0"
+                  decoration-danger="outcome in ('failed', 'reconnect', 'blocked')"
+                  decoration-warning="outcome == 'quota' or failed">
+                <field name="started"/>
+                <field name="user_id"/>
+                <field name="google_email" optional="hide"/>
+                <field name="trigger"/>
+                <field name="outcome" widget="badge" decoration-success="outcome == 'done'"
+                       decoration-info="outcome == 'partial'" decoration-warning="outcome == 'quota'"
+                       decoration-danger="outcome in ('failed', 'reconnect', 'blocked')"/>
+                <field name="from_google"/>
+                <field name="to_google"/>
+                <field name="failed"/>
+                <field name="summary"/>
+                <field name="duration" optional="hide"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="twp_google_contacts_log_view_form" model="ir.ui.view">
+        <field name="name">twp.google.contacts.log.form</field>
+        <field name="model">twp.google.contacts.log</field>
+        <field name="arch" type="xml">
+            <form string="Sync" create="0" edit="0">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="started"/>
+                            <field name="user_id"/>
+                            <field name="google_email"/>
+                            <field name="trigger"/>
+                        </group>
+                        <group>
+                            <field name="outcome"/>
+                            <field name="from_google"/>
+                            <field name="to_google"/>
+                            <field name="failed"/>
+                            <field name="duration"/>
+                        </group>
+                    </group>
+                    <field name="summary" readonly="1"/>
+                    <field name="line_ids" invisible="not line_ids" readonly="1">
+                        <list>
+                            <field name="partner_id"/>
+                            <field name="resource_name"/>
+                            <field name="message"/>
+                        </list>
+                    </field>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="twp_google_contacts_log_view_search" model="ir.ui.view">
+        <field name="name">twp.google.contacts.log.search</field>
+        <field name="model">twp.google.contacts.log</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="user_id"/>
+                <field name="google_email"/>
+                <filter name="trouble" string="Not done, or with failures"
+                        domain="['|', ('outcome', '!=', 'done'), ('failed', '>', 0)]"/>
+                <filter name="changes" string="Changed something"
+                        domain="['|', '|', ('from_google', '>', 0), ('to_google', '>', 0), ('failed', '>', 0)]"/>
+                <separator/>
+                <filter name="scheduled" string="Scheduled" domain="[('trigger', '=', 'cron')]"/>
+                <filter name="manual" string="Sync now" domain="[('trigger', '=', 'manual')]"/>
+                <group>
+                    <filter name="by_user" string="User" context="{'group_by': 'user_id'}"/>
+                    <filter name="by_outcome" string="Outcome" context="{'group_by': 'outcome'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="twp_google_contacts_log_action" model="ir.actions.act_window">
+        <field name="name">Google Contacts sync log</field>
+        <field name="res_model">twp.google.contacts.log</field>
+        <field name="view_mode">list,form</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">No syncs yet</p>
+            <p>Each sync of each connected Google account is listed here for 90 days: what it
+               changed each way, and every contact that failed, with Google's reason.</p>
+        </field>
+    </record>
+</odoo>

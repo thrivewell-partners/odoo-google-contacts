@@ -7,3 +7,5 @@ access_twp_google_contacts_candidate_user,twp.google.contacts.candidate user,mod
 access_twp_google_contacts_key_system,twp.google.contacts.key system,model_twp_google_contacts_key,base.group_system,1,0,0,0
 access_twp_google_contacts_tag_rule_system,twp.google.contacts.tag.rule system,model_twp_google_contacts_tag_rule,base.group_system,1,1,1,1
 access_twp_google_contacts_field_map_system,twp.google.contacts.field.map system,model_twp_google_contacts_field_map,base.group_system,1,1,1,1
+access_twp_google_contacts_log_system,twp.google.contacts.log system,model_twp_google_contacts_log,base.group_system,1,0,0,1
+access_twp_google_contacts_log_line_system,twp.google.contacts.log.line system,model_twp_google_contacts_log_line,base.group_system,1,0,0,1

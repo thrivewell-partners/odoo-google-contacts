@@ -2,7 +2,7 @@ from unittest.mock import patch
 
 from odoo.tests import TransactionCase, tagged
 
-from ..models.twp_google_contacts_account import GoogleApiError, GoogleReconnect
+from ..models.twp_google_contacts_account import GoogleApiError, GoogleQuota, GoogleReconnect
 from .common import GOOGLE, SLEEP, FakeGoogle, GoogleContactsCase, response
 
 STALE_ETAG = response(400, {"error": {"code": 400, "status": "FAILED_PRECONDITION",
@@ -55,13 +55,43 @@ class TestGoogleRequest(GoogleContactsCase, TransactionCase):
         self.assertTrue(1 <= waits[0] < 2)
         self.assertEqual(waits[1], 7)
 
-    def test_rate_limit_gives_up_after_five_tries(self):
+    def test_rate_limit_waits_a_minute_out_then_stops(self):
         google = FakeGoogle(response(429, {"error": {"status": "RESOURCE_EXHAUSTED",
                                                      "message": "Quota"}}))
+        with self.assertRaises(GoogleQuota) as caught:
+            self.request(google)
+        self.assertEqual(len(google.calls), 7)
+        self.assertGreater(sum(c.args[0] for c in self.sleep.call_args_list), 60)
+        self.assertFalse(caught.exception.daily)
+        self.assertNotIsInstance(caught.exception, GoogleApiError)
+
+    def test_server_errors_give_up_after_five_tries(self):
+        google = FakeGoogle(response(503, {"error": {"status": "UNAVAILABLE", "message": "Down"}}))
         with self.assertRaises(GoogleApiError) as caught:
             self.request(google)
         self.assertEqual(len(google.calls), 5)
-        self.assertEqual(caught.exception.google_status, "RESOURCE_EXHAUSTED")
+        self.assertEqual(caught.exception.status, 503)
+
+    def test_daily_limit_is_told_apart(self):
+        google = FakeGoogle(response(429, {"error": {
+            "status": "RESOURCE_EXHAUSTED", "message": "Quota exceeded",
+            "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                         "reason": "RATE_LIMIT_EXCEEDED",
+                         "metadata": {"quota_limit": "DailyContactWritesPerDayPerUser"}}]}}))
+        with self.assertRaises(GoogleQuota) as caught:
+            self.request(google, "POST", "people:createContact")
+        self.assertTrue(caught.exception.daily)
+        self.assertIn("tomorrow", caught.exception.args[0])
+
+    def test_writes_are_spaced_out(self):
+        self.env["ir.config_parameter"].sudo().set_param("twp_google_contacts.write_gap", "0.5")
+        google = FakeGoogle(response(200, {}))
+        self.request(google, "POST", "contactGroups")
+        self.request(google, "POST", "contactGroups")
+        self.request(google, "GET", "contactGroups")
+        waits = [c.args[0] for c in self.sleep.call_args_list]
+        self.assertEqual(len(waits), 1, "the second write waits; a read does not")
+        self.assertTrue(0 < waits[0] <= 0.5)
 
     def test_stale_etag_is_handed_to_the_caller(self):
         with self.assertRaises(GoogleApiError) as caught:

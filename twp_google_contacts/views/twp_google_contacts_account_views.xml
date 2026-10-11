@@ -19,6 +19,7 @@
                         invisible="state != 'connected'"/>
                 <button name="action_review" type="object" string="Review" icon="fa-list"
                         invisible="not review_count"/>
+                <button name="action_log" type="object" string="Log" icon="fa-history"/>
                 <button name="action_disconnect" type="object" string="Disconnect" icon="fa-unlink"
                         confirm="Disconnect this Google account? Its sign-in is given back and syncing stops."/>
             </list>
