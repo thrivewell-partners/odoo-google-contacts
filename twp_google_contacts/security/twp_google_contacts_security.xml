@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Each user reviews only the Google contacts from their own account. -->
+    <record id="twp_google_contacts_candidate_rule_own" model="ir.rule">
+        <field name="name">Google contacts to review: own account</field>
+        <field name="model_id" ref="model_twp_google_contacts_candidate"/>
+        <field name="domain_force">[('user_id', '=', user.id)]</field>
+        <field name="groups" eval="[Command.link(ref('base.group_user'))]"/>
+    </record>
+    <record id="twp_google_contacts_candidate_rule_admin" model="ir.rule">
+        <field name="name">Google contacts to review: administrators see all</field>
+        <field name="model_id" ref="model_twp_google_contacts_candidate"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+        <field name="groups" eval="[Command.link(ref('base.group_system'))]"/>
+    </record>
+</odoo>

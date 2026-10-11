@@ -1,79 +1,10 @@
-import copy
 from unittest.mock import patch
 
 from odoo.tests import TransactionCase, tagged
 
-from .common import GOOGLE, GoogleContactsCase, response
+from .common import GOOGLE, FakePeople, GoogleContactsCase
 
 ACCOUNT = "odoo.addons.twp_google_contacts.models.twp_google_contacts_account"
-
-
-class FakePeople:
-    """An in-memory Google Contacts for one account, strict about etags as Google is."""
-
-    def __init__(self):
-        self.people = {}
-        self.groups = {"contactGroups/myContacts": {"name": "myContacts", "groupType": "SYSTEM_CONTACT_GROUP"},
-                       "contactGroups/family": {"name": "Family", "groupType": "USER_CONTACT_GROUP"}}
-        self.members = {}
-        self.writes = []
-        self.serial = 0
-        self.before_write = None  # called before an update is applied, to stage a Google change
-
-    def _next(self, prefix):
-        self.serial += 1
-        return "%s%s" % (prefix, self.serial)
-
-    def __call__(self, method, url, params=None, json=None, timeout=None, headers=None):
-        path = url.split("/v1/", 1)[1]
-        params = params or {}
-        if method != "GET":
-            self.writes.append((method, path))
-        if path == "contactGroups" and method == "GET":
-            return response(200, {"contactGroups": [dict(g, resourceName=r)
-                                                    for r, g in self.groups.items()]})
-        if path == "contactGroups" and method == "POST":
-            resource = self._next("contactGroups/g")
-            self.groups[resource] = {"name": json["contactGroup"]["name"],
-                                     "groupType": "USER_CONTACT_GROUP"}
-            return response(200, dict(self.groups[resource], resourceName=resource))
-        if path.endswith("/members:modify"):
-            group = path[:-len("/members:modify")]
-            members = self.members.setdefault(group, set())
-            members |= set(json.get("resourceNamesToAdd", []))
-            members -= set(json.get("resourceNamesToRemove", []))
-            return response(200, {})
-        if path == "people:createContact":
-            resource = self._next("people/c")
-            self.people[resource] = dict(copy.deepcopy(json), resourceName=resource,
-                                         etag=self._next("e"))
-            return response(200, self.people[resource])
-        resource = path.split(":")[0]
-        if resource not in self.people:
-            return response(404, {"error": {"code": 404, "status": "NOT_FOUND",
-                                            "message": "Requested entity was not found."}})
-        if method == "GET":
-            return response(200, copy.deepcopy(self.people[resource]))
-        if path.endswith(":updateContact"):
-            if self.before_write:
-                self.before_write(self.people[resource])
-                self.before_write = None
-            if json["etag"] != self.people[resource]["etag"]:
-                return response(400, {"error": {"code": 400, "status": "FAILED_PRECONDITION",
-                                                "message": "Request person.etag is different"}})
-            for field in params["updatePersonFields"].split(","):
-                self.people[resource][field] = copy.deepcopy(json.get(field, []))
-            self.people[resource]["etag"] = self._next("e")
-            return response(200, copy.deepcopy(self.people[resource]))
-        raise AssertionError("unexpected call %s %s" % (method, path))
-
-    def change(self, resource, **fields):
-        """A change made by the user in Google."""
-        self.people[resource].update(fields)
-        self.people[resource]["etag"] = self._next("e")
-
-    def emails(self, resource):
-        return [e["value"] for e in self.people[resource].get("emailAddresses", [])]
 
 
 @tagged("post_install", "-at_install")

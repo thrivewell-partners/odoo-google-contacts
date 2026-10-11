@@ -14,6 +14,13 @@
                                    invisible="google_contacts_state == 'none'"/>
                         </group>
                     </group>
+                    <div class="alert alert-info" role="status"
+                         invisible="not google_contacts_review_count">
+                        <field name="google_contacts_review_count" class="fw-bold" readonly="1"/>
+                        contacts from Google are waiting for you to say which Odoo contact each one is.
+                        <button name="action_google_contacts_review" type="object"
+                                string="Review" class="btn-link"/>
+                    </div>
                     <div>
                         <button name="action_google_contacts_connect" type="object"
                                 string="Connect" class="btn-primary"

@@ -3,7 +3,7 @@
 Odoo owns one item in each of Google's lists: one email, one phone, one work address, one website,
 one organization. A sync replaces that item and leaves every other item as Google has it, because
 Google replaces a whole list when one is sent (proof 4). Which item is Odoo's is decided by the value
-Odoo last sent, kept on the link.
+Odoo last sent, kept on the link. Coming back, the same item is the one read into the partner.
 """
 import hashlib
 import json
@@ -77,6 +77,89 @@ def new_person(values, anchor_value):
     return person
 
 
+def with_anchor(person, anchor_value):
+    """The person's clientData with this database's anchor set. Other apps' keys, and other
+    databases' anchors, are kept, because Google replaces the whole list on update."""
+    prefix = anchor_value.rsplit(":", 1)[0] + ":"
+    others = [_clean(item) for item in person.get("clientData", [])
+              if not (item.get("key") == ANCHOR_KEY
+                      and (item.get("value") or "").startswith(prefix))]
+    return others + [{"key": ANCHOR_KEY, "value": anchor_value}]
+
+
+def anchored_partner_id(person, db_uuid):
+    """The partner id in this database's anchor on the person, or None. An anchor written by
+    another database, such as the one this was copied from, is not ours."""
+    prefix = "odoo:%s:res.partner:" % db_uuid
+    for item in person.get("clientData", []):
+        value = item.get("value") or ""
+        if item.get("key") == ANCHOR_KEY and value.startswith(prefix):
+            tail = value[len(prefix):]
+            if tail.isdigit():
+                return int(tail)
+    return None
+
+
+def in_label(person, label_resource_name):
+    return any(m.get("contactGroupMembership", {}).get("contactGroupResourceName")
+               == label_resource_name for m in person.get("memberships", []))
+
+
+def label_resource_names(person):
+    return {m["contactGroupMembership"]["contactGroupResourceName"]
+            for m in person.get("memberships", [])
+            if m.get("contactGroupMembership", {}).get("contactGroupResourceName")}
+
+
+def google_values(person, pushed=None):
+    """The person in the shape of partner_values: Odoo's item from each of Google's lists.
+
+    Odoo's item is the one still holding what Odoo last sent, so a value Google only reformatted
+    reads as unchanged. When that item is gone, Google's primary item stands in, then the first.
+    """
+    pushed = pushed or {}
+    names = person.get("names") or [{}]
+    given, family = names[0].get("givenName") or None, names[0].get("familyName") or None
+    values = {"name": {"givenName": given, "familyName": family} if given or family else None}
+
+    old = pushed.get("organization")
+    org = _pick(person.get("organizations"), lambda i: _ours_organization(i, old))
+    values["organization"] = None
+    if org and (org.get("name") or org.get("title")):
+        values["organization"] = {"name": org.get("name") or None, "title": org.get("title") or None}
+
+    for group, same in (("email", _same_text), ("phone", _same_phone), ("website", _same_url)):
+        old = pushed.get(group)
+        item = _pick(person.get(GROUPS[group]),
+                     lambda i, old=old, same=same: old is not None and same(i.get("value") or "", old))
+        value = ((item or {}).get("value") or "").strip() or None
+        values[group] = old if value and old is not None and same(value, old) else value
+
+    old = pushed.get("address")
+    item = _pick(person.get("addresses"), lambda i: _ours_address(i, old),
+                 lambda i: i.get("type") == "work")
+    address = {key: (item or {}).get(key) or None for key in ADDRESS_KEYS}
+    values["address"] = address if any(address.values()) else None
+
+    notes = person.get("biographies") or [{}]
+    values["note"] = (notes[0].get("value") or "").strip() or None
+    return values
+
+
+ADDRESS_KEYS = ("streetAddress", "extendedAddress", "city", "region", "postalCode", "country",
+                "countryCode")
+
+
+def _pick(items, ours, preferred=None):
+    """Odoo's item if it is still there, else the preferred one, else the primary, else the first."""
+    items = items or []
+    for test in (ours, preferred, lambda i: i.get("metadata", {}).get("primary")):
+        found = next((i for i in items if test and test(i)), None)
+        if found:
+            return found
+    return items[0] if items else None
+
+
 def changed_groups(values, pushed):
     return [group for group in GROUPS if values.get(group) != (pushed or {}).get(group)]
 
@@ -122,6 +205,20 @@ def _same_phone(a, b):
     return bool(a) and bool(b) and (a == b or a[-10:] == b[-10:])
 
 
+def phone_tail(number):
+    """The last ten digits a phone number is matched on, or None when it is too short to be one."""
+    digits = _digits(number)
+    return digits[-10:] if len(digits) >= 7 else None
+
+
+def _same_url(a, b):
+    """Odoo adds http:// to a website it is given, so the scheme and a closing slash are not a
+    difference."""
+    def bare(url):
+        return re.sub(r"^[a-z]+://", "", url.strip().lower()).rstrip("/")
+    return bare(a) == bare(b)
+
+
 def _merge_name(items, new, old):
     if new is None:
         return items if old is None else []
@@ -136,17 +233,26 @@ def _merge_name(items, new, old):
     return [first] + rest
 
 
-def _merge_organization(items, new, old):
-    def ours(item):
-        return old is not None and (item.get("name") or None) == old.get("name")
+def _ours_organization(item, old):
+    """Odoo's organization is found by the company name it sent, or by the job title when it sent
+    no company name."""
+    if old is None:
+        return False
+    if old.get("name"):
+        return (item.get("name") or None) == old["name"]
+    return bool(old.get("title")) and (item.get("title") or None) == old["title"]
 
-    index = next((i for i, item in enumerate(items) if ours(item)), None)
+
+def _merge_organization(items, new, old):
+    index = next((i for i, item in enumerate(items) if _ours_organization(item, old)), None)
     if new is None:
         return [item for i, item in enumerate(items) if i != index]
     if index is None:
         return [_drop_empty(dict(new))] + items
     updated = dict(items[index])
     for key, value in new.items():
+        if value == (old or {}).get(key):
+            continue  # Odoo did not change this part, so Google's stands
         if value:
             updated[key] = value
         else:
@@ -154,12 +260,13 @@ def _merge_organization(items, new, old):
     return items[:index] + [updated] + items[index + 1:]
 
 
-def _merge_address(items, new, old):
-    def ours(item):
-        keys = ("streetAddress", "city", "postalCode")
-        return old is not None and all((item.get(k) or None) == old.get(k) for k in keys)
+def _ours_address(item, old):
+    keys = ("streetAddress", "city", "postalCode")
+    return old is not None and all((item.get(k) or None) == old.get(k) for k in keys)
 
-    index = next((i for i, item in enumerate(items) if ours(item)), None)
+
+def _merge_address(items, new, old):
+    index = next((i for i, item in enumerate(items) if _ours_address(item, old)), None)
     kept = [item for i, item in enumerate(items) if i != index]
     if new is None:
         return kept
@@ -182,7 +289,7 @@ MERGERS = {
     "email": lambda items, new, old: _merge_value(items, new, old, "value", _same_text),
     "phone": lambda items, new, old: _merge_value(items, new, old, "value", _same_phone),
     "address": _merge_address,
-    "website": lambda items, new, old: _merge_value(items, new, old, "value", _same_text),
+    "website": lambda items, new, old: _merge_value(items, new, old, "value", _same_url),
     "note": _merge_note,
 }
 

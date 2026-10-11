@@ -1,7 +1,7 @@
 from odoo import fields, models
 from odoo.exceptions import AccessError
 
-USER_FIELDS = ["google_contacts_state", "google_contacts_email"]
+USER_FIELDS = ["google_contacts_state", "google_contacts_email", "google_contacts_review_count"]
 
 
 class ResUsers(models.Model):
@@ -15,6 +15,8 @@ class ResUsers(models.Model):
         string="Google Contacts", compute="_compute_google_contacts")
     google_contacts_email = fields.Char(
         string="Google account", compute="_compute_google_contacts")
+    google_contacts_review_count = fields.Integer(
+        string="Google contacts to review", compute="_compute_google_contacts")
 
     @property
     def SELF_READABLE_FIELDS(self):
@@ -28,6 +30,7 @@ class ResUsers(models.Model):
             account = by_user.get(user.id)
             user.google_contacts_state = account.state if account else "none"
             user.google_contacts_email = account.google_email if account else False
+            user.google_contacts_review_count = account.review_count if account else 0
 
     def _google_contacts_account(self):
         """The user's own account. Only the user, or an administrator, may act on it."""
@@ -61,6 +64,12 @@ class ResUsers(models.Model):
         if not account:
             return {"type": "ir.actions.client", "tag": "soft_reload"}
         return account.action_sync_now()
+
+    def action_google_contacts_review(self):
+        account = self._google_contacts_account()
+        if not account:
+            return {"type": "ir.actions.client", "tag": "soft_reload"}
+        return account.action_review()
 
     def action_google_contacts_disconnect(self):
         account = self._google_contacts_account()

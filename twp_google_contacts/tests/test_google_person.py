@@ -82,3 +82,33 @@ class TestGooglePerson(BaseCase):
         self.assertEqual(gp.person_hash(a), gp.person_hash(b))
         self.assertNotEqual(gp.person_hash(a), gp.person_hash(
             {"emailAddresses": [{"value": "b@example.com"}]}))
+
+    def test_google_values_read_odoos_item(self):
+        person = {"emailAddresses": [{"value": "home@example.com", "metadata": {"primary": True}},
+                                     {"value": "Ada@Example.com"}],
+                  "phoneNumbers": [{"value": "+1 317-555-0140"}],
+                  "urls": [{"value": "https://ada.example/"}]}
+        pushed = {"email": "ada@example.com", "phone": "(317) 555-0140",
+                  "website": "http://ada.example"}
+        values = gp.google_values(person, pushed)
+        # Odoo's items are still there, only written differently: unchanged.
+        self.assertEqual((values["email"], values["phone"], values["website"]),
+                         ("ada@example.com", "(317) 555-0140", "http://ada.example"))
+        # With Odoo's item gone, Google's primary stands in.
+        self.assertEqual(gp.google_values(person, {"email": "gone@example.com"})["email"],
+                         "home@example.com")
+
+    def test_google_values_of_an_empty_person(self):
+        self.assertEqual(set(gp.google_values({}).values()), {None})
+
+    def test_anchor_of_another_database_is_not_ours(self):
+        person = {"clientData": [{"key": "thrivewell.anchor", "value": "odoo:other:res.partner:7"},
+                                 {"key": "someone.else", "value": "x"}]}
+        self.assertIsNone(gp.anchored_partner_id(person, "ours"))
+        mine = gp.with_anchor(person, "odoo:ours:res.partner:9")
+        self.assertEqual(mine, person["clientData"] + [
+            {"key": "thrivewell.anchor", "value": "odoo:ours:res.partner:9"}])
+        # Writing it again replaces only this database's own anchor.
+        self.assertEqual(gp.with_anchor({"clientData": mine}, "odoo:ours:res.partner:10")[-1],
+                         {"key": "thrivewell.anchor", "value": "odoo:ours:res.partner:10"})
+        self.assertEqual(len(gp.with_anchor({"clientData": mine}, "odoo:ours:res.partner:10")), 3)

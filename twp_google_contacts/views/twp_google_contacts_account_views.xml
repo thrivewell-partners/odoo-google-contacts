@@ -12,10 +12,13 @@
                 <field name="create_date" string="Connected on"/>
                 <field name="last_sync"/>
                 <field name="last_sync_result"/>
+                <field name="review_count"/>
                 <button name="action_sync_now" type="object" string="Sync now" icon="fa-refresh"
                         invisible="state != 'connected'"/>
                 <button name="action_check" type="object" string="Check" icon="fa-plug"
                         invisible="state != 'connected'"/>
+                <button name="action_review" type="object" string="Review" icon="fa-list"
+                        invisible="not review_count"/>
                 <button name="action_disconnect" type="object" string="Disconnect" icon="fa-unlink"
                         confirm="Disconnect this Google account? Its sign-in is given back and syncing stops."/>
             </list>

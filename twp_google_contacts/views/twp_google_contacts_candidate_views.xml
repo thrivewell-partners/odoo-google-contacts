@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="twp_google_contacts_candidate_view_list" model="ir.ui.view">
+        <field name="name">twp.google.contacts.candidate.list</field>
+        <field name="model">twp.google.contacts.candidate</field>
+        <field name="arch" type="xml">
+            <list string="Google contacts to review" editable="bottom" create="0" delete="0">
+                <header>
+                    <button name="action_link" type="object" string="Accept" class="btn-primary"
+                            display="always"
+                            help="Link each selected contact to its Odoo contact, or add it to Odoo when none is chosen. With nothing selected, this applies to every contact still to review."/>
+                    <button name="action_create" type="object" string="Add as new"/>
+                    <button name="action_skip" type="object" string="Keep out of Odoo"/>
+                </header>
+                <field name="name"/>
+                <field name="email"/>
+                <field name="phone"/>
+                <field name="company_name" optional="show"/>
+                <field name="match_id" readonly="state != 'pending'"
+                       placeholder="New contact" options="{'no_create': True}"/>
+                <field name="match_reason"/>
+                <field name="state" widget="badge" decoration-info="state == 'pending'"
+                       decoration-success="state == 'done'"/>
+                <button name="action_link" type="object" string="Accept" icon="fa-check"
+                        invisible="state != 'pending'"/>
+                <button name="action_skip" type="object" string="Keep out of Odoo" icon="fa-ban"
+                        invisible="state != 'pending'"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="twp_google_contacts_candidate_view_search" model="ir.ui.view">
+        <field name="name">twp.google.contacts.candidate.search</field>
+        <field name="model">twp.google.contacts.candidate</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="name"/>
+                <field name="email"/>
+                <field name="phone"/>
+                <filter name="pending" string="To review" domain="[('state', '=', 'pending')]"/>
+                <filter name="skipped" string="Kept out of Odoo" domain="[('state', '=', 'skipped')]"/>
+            </search>
+        </field>
+    </record>
+</odoo>
