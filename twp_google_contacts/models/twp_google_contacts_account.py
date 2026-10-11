@@ -260,7 +260,8 @@ class TwpGoogleContactsAccount(models.Model):
         main = account._main_label()
         # In tagged mode the scope tags only choose who syncs; they are not labels of their own.
         scope_tags = self.env["res.partner.category"]
-        if self.env["ir.config_parameter"].sudo().get_param("twp_google_contacts.scope") == "tagged":
+        params = self.env["ir.config_parameter"].sudo()
+        if params.get_param("twp_google_contacts.scope") == "tagged":
             scope_tags = account.user_id.company_id.twp_google_contacts_tag_ids
         tag_labels = account._tag_labels(partners.category_id - scope_tags)
         db_uuid = self.env["ir.config_parameter"].sudo().get_param("database.uuid")
