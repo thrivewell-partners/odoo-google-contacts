@@ -1,6 +1,6 @@
 import secrets
 
-from odoo import _, fields, models
+from odoo import fields, models
 from odoo.exceptions import UserError
 from odoo.http import request
 
@@ -19,9 +19,9 @@ class TwpGoogleContactsConnect(models.TransientModel):
     def action_continue(self):
         self.ensure_one()
         if not self.consent:
-            raise UserError(_("Tick “I agree” to continue to Google."))
+            raise UserError(self.env._("Tick “I agree” to continue to Google."))
         if not request:
-            raise UserError(_("Connect from Odoo in a web browser."))
+            raise UserError(self.env._("Connect from Odoo in a web browser."))
         # The state ties Google's answer to this browser session, so a sign-in started by someone
         # else cannot be finished into this user's account.
         state = secrets.token_urlsafe(32)

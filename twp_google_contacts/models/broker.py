@@ -7,7 +7,6 @@ import logging
 
 import requests
 
-from odoo import _
 from odoo.exceptions import UserError
 
 _logger = logging.getLogger(__name__)
@@ -36,7 +35,7 @@ def call(env, path, payload):
     url = (params.get_param("twp_google_contacts.broker_url") or DEFAULT_URL).rstrip("/")
     key = params.get_param("twp_google_contacts.broker_key")
     if not key:
-        raise UserError(_(
+        raise UserError(env._(
             "Google Contacts is not set up yet. An administrator needs to enter the ThriveWell "
             "Connect key in Settings."))
     try:
@@ -45,7 +44,7 @@ def call(env, path, payload):
             headers={"Authorization": "Bearer " + key})
     except requests.RequestException as e:
         _logger.warning("ThriveWell Connect unreachable at %s: %s", url, type(e).__name__)
-        raise UserError(_(
+        raise UserError(env._(
             "ThriveWell Connect could not be reached. Nothing has changed; try again in a few "
             "minutes.")) from None
     try:
@@ -53,9 +52,10 @@ def call(env, path, payload):
     except ValueError:
         body = {}
     if response.status_code == 401:
-        raise UserError(_(
+        raise UserError(env._(
             "ThriveWell Connect refused this database's key. An administrator needs to check the "
             "key in Settings."))
     if response.status_code != 200:
-        raise BrokerError(response.status_code, body.get("error") or "http_%s" % response.status_code)
+        error = body.get("error") or "http_%s" % response.status_code
+        raise BrokerError(response.status_code, error)
     return body

@@ -5,7 +5,7 @@ from datetime import timedelta
 
 import requests
 
-from odoo import _, api, fields, models
+from odoo import api, fields, models
 from odoo.exceptions import UserError
 
 from . import broker
@@ -18,17 +18,17 @@ MAX_ATTEMPTS = 5
 MAX_WAIT = 60
 
 
-def state_message(state):
+def state_message(env, state):
     """What a user is told when a connection cannot be used, in words they can act on."""
     return {
-        "reconnect": _(
+        "reconnect": env._(
             "Google no longer accepts this connection. It was revoked, or it expired. Open your "
             "preferences and press Connect again."),
-        "blocked": _(
+        "blocked": env._(
             "Your Google Workspace administrator has not allowed ThriveWell's Google Contacts "
             "app. Ask them to allow it in the Google Admin console, under Security, API "
             "controls. ThriveWell's setup guide gives the client ID they need."),
-    }.get(state, _("Google Contacts is not connected."))
+    }.get(state, env._("Google Contacts is not connected."))
 
 
 class GoogleReconnect(UserError):
@@ -38,8 +38,8 @@ class GoogleReconnect(UserError):
     transaction commit.
     """
 
-    def __init__(self, state):
-        super().__init__(state_message(state))
+    def __init__(self, env, state):
+        super().__init__(state_message(env, state))
         self.state = state
 
 
@@ -47,8 +47,8 @@ class GoogleApiError(UserError):
     """Google answered a request with an error. `google_status` is Google's own name for it, such
     as FAILED_PRECONDITION for a stale etag."""
 
-    def __init__(self, status, google_status, message):
-        super().__init__(_("Google refused the request: %(message)s", message=message))
+    def __init__(self, env, status, google_status, message):
+        super().__init__(env._("Google refused the request: %(message)s", message=message))
         self.status = status
         self.google_status = google_status
 
@@ -106,7 +106,7 @@ class TwpGoogleContactsAccount(models.Model):
                 broker.call(self.env, "/v1/disconnect", {"connection_id": account.connection_id})
             except broker.BrokerError as e:
                 if e.status != 404:  # already gone is the outcome we wanted
-                    raise UserError(_(
+                    raise UserError(self.env._(
                         "ThriveWell Connect could not disconnect Google (%(error)s). Nothing has "
                         "changed; try again in a few minutes.", error=e.error)) from None
 
@@ -120,7 +120,7 @@ class TwpGoogleContactsAccount(models.Model):
         self.ensure_one()
         account = self.sudo()
         if account.state != "connected":
-            raise GoogleReconnect(account.state)
+            raise GoogleReconnect(self.env, account.state)
         now = fields.Datetime.now()
         if account.access_token and account.access_token_expiry > now + timedelta(seconds=60):
             return account.access_token
@@ -131,12 +131,12 @@ class TwpGoogleContactsAccount(models.Model):
                      "admin_policy_enforced": "blocked"}.get(e.error)
             if state:
                 account.write({"state": state, "access_token": False, "access_token_expiry": False})
-                raise GoogleReconnect(state) from None
+                raise GoogleReconnect(self.env, state) from None
             if e.error == "connector_not_allowed":
-                raise UserError(_(
+                raise UserError(self.env._(
                     "This database's ThriveWell Connect key does not include Google Contacts. "
                     "Ask ThriveWell to add it.")) from None
-            raise UserError(_(
+            raise UserError(self.env._(
                 "Google did not answer ThriveWell Connect. Syncing pauses and nothing is lost; "
                 "try again later.")) from None
         account.write({
@@ -179,7 +179,8 @@ class TwpGoogleContactsAccount(models.Model):
                     continue
             break
         if response is None:
-            raise UserError(_("Google could not be reached. Nothing has changed; try again later."))
+            raise UserError(self.env._(
+                "Google could not be reached. Nothing has changed; try again later."))
         try:
             body = response.json() if response.content else {}
         except ValueError:
@@ -193,8 +194,8 @@ class TwpGoogleContactsAccount(models.Model):
             # The token no longer carries the Contacts permission.
             self.sudo().write({"state": "reconnect", "access_token": False,
                                "access_token_expiry": False})
-            raise GoogleReconnect("reconnect")
-        raise GoogleApiError(response.status_code, error.get("status"),
+            raise GoogleReconnect(self.env, "reconnect")
+        raise GoogleApiError(self.env, response.status_code, error.get("status"),
                              error.get("message") or "HTTP %s" % response.status_code)
 
     @staticmethod
@@ -215,9 +216,10 @@ class TwpGoogleContactsAccount(models.Model):
             return self._notify(e.args[0], "danger")
         except UserError as e:
             return self._notify(e.args[0], "warning")
-        return self._notify(_("Google Contacts is working for %(email)s. Google answered with "
-                              "%(count)s labels.", email=self.google_email,
-                              count=body.get("totalItems", 0)), "success")
+        message = self.env._(
+            "Google Contacts is working for %(email)s. Google answered with %(count)s labels.",
+            email=self.google_email, count=body.get("totalItems", 0))
+        return self._notify(message, "success")
 
     def action_disconnect(self):
         self._disconnect()
@@ -228,6 +230,6 @@ class TwpGoogleContactsAccount(models.Model):
         return {
             "type": "ir.actions.client",
             "tag": "display_notification",
-            "params": {"title": _("Google Contacts"), "message": message, "type": kind,
+            "params": {"title": self.env._("Google Contacts"), "message": message, "type": kind,
                        "sticky": kind != "success"},
         }

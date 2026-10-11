@@ -1,4 +1,4 @@
-from odoo import _, fields, models
+from odoo import fields, models
 from odoo.exceptions import AccessError
 
 USER_FIELDS = ["google_contacts_state", "google_contacts_email"]
@@ -33,7 +33,7 @@ class ResUsers(models.Model):
         """The user's own account. Only the user, or an administrator, may act on it."""
         self.ensure_one()
         if self != self.env.user and not self.env.is_admin():
-            raise AccessError(_("Only %(name)s can change their Google connection.",
+            raise AccessError(self.env._("Only %(name)s can change their Google connection.",
                                 name=self.name))
         return self.env["twp.google.contacts.account"].sudo().search(
             [("user_id", "=", self.id)])
@@ -41,10 +41,10 @@ class ResUsers(models.Model):
     def action_google_contacts_connect(self):
         self.ensure_one()
         if self != self.env.user:
-            raise AccessError(_("Each user connects their own Google account."))
+            raise AccessError(self.env._("Each user connects their own Google account."))
         return {
             "type": "ir.actions.act_window",
-            "name": _("Connect Google Contacts"),
+            "name": self.env._("Connect Google Contacts"),
             "res_model": "twp.google.contacts.connect",
             "view_mode": "form",
             "target": "new",

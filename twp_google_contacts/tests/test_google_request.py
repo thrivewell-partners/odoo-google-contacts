@@ -73,6 +73,11 @@ class TestGoogleRequest(GoogleContactsCase, TransactionCase):
     def test_lost_contacts_permission_marks_reconnect(self):
         with self.assertRaises(GoogleReconnect):
             self.request(FakeGoogle(SCOPE_GONE))
+        # Escaping, the error rolls its own state change back. The entry point catches it, so
+        # the change sticks.
+        with patch(GOOGLE, FakeGoogle(SCOPE_GONE)):
+            action = self.account.action_check()
+        self.assertEqual(action["params"]["type"], "danger")
         self.assertEqual(self.account.state, "reconnect")
 
     def test_check_reports_the_label_count(self):
