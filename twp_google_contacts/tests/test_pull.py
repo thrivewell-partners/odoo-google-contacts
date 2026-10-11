@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from odoo.exceptions import AccessError
+from odoo.exceptions import AccessError, UserError
 from odoo.tests import TransactionCase, new_test_user, tagged
 
 from .common import GOOGLE, FakePeople, GoogleContactsCase
@@ -148,7 +148,8 @@ class TestPull(GoogleContactsCase, TransactionCase):
         self.sync()
         other = new_test_user(self.env, "reviewer2", groups="base.group_user")
         self.assertFalse(self.Candidate.with_user(other).search([]))
-        with self.assertRaises(AccessError):
+        # Refused by the record rules, or by the owner check when the row is already in cache.
+        with self.assertRaises((AccessError, UserError)):
             self.pending().with_user(other).action_link()
         self.assertEqual(len(self.pending()), 1)
 
