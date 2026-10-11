@@ -10,6 +10,7 @@ DIRECTIONS = [("both", "Both ways"),
 # The details a client may leave out of the sync. The name always syncs.
 DETAILS = ["organization", "email", "phone", "address", "website", "note", "photo"]
 DETAILS_OFF = "twp_google_contacts.details_off"
+LABEL_PARAMS = ("twp_google_contacts.tags_default", "twp_google_contacts.labels_default")
 
 OWNERS = [("all", "Everyone in scope"),
           ("mine", "Only contacts they own"),
@@ -71,6 +72,20 @@ class ResConfigSettings(models.TransientModel):
     twp_google_contacts_sync_website = fields.Boolean(string="Website")
     twp_google_contacts_sync_note = fields.Boolean(string="Notes")
     twp_google_contacts_sync_photo = fields.Boolean(string="Photo")
+    twp_google_contacts_tags_default = fields.Selection(
+        [("label", "Each becomes a Google label of its name"),
+         ("none", "Not sent")],
+        string="Tags with no rule",
+        config_parameter="twp_google_contacts.tags_default",
+        default="label")
+    twp_google_contacts_labels_default = fields.Selection(
+        [("ignore", "Left alone"),
+         ("tag", "Each becomes an Odoo tag of its name")],
+        string="Google labels with no rule",
+        config_parameter="twp_google_contacts.labels_default",
+        default="ignore",
+        help="A contact added to a label in Google gets the tag of the same name in Odoo, made "
+             "when Odoo has none, and loses it when taken out.")
     twp_google_contacts_conflict = fields.Selection(
         [("latest", "The most recent change"),
          ("odoo", "Odoo's"),
@@ -100,6 +115,10 @@ class ResConfigSettings(models.TransientModel):
         return res
 
     def set_values(self):
+        params = self.env["ir.config_parameter"].sudo()
+        before = [params.get_param(k) for k in LABEL_PARAMS]
         super().set_values()
+        if before != [params.get_param(k) for k in LABEL_PARAMS]:
+            self.env["twp.google.contacts.account"]._labels_changed()
         off = [d for d in DETAILS if not self["twp_google_contacts_sync_" + d]]
         self.env["ir.config_parameter"].sudo().set_param(DETAILS_OFF, ",".join(off) or False)

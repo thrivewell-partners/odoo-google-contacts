@@ -28,6 +28,8 @@ class TwpGoogleContactsLink(models.Model):
     google_hash = fields.Char(help="A hash of the synced fields as Google held them after Odoo's "
                                    "last write, to recognise that write when it comes back")
     label_resource_names = fields.Json(help="The labels Odoo last put the contact in")
+    google_labels = fields.Json(help="The user's labels the contact was in at the last sync, to "
+                                     "tell which were added or removed in Google")
     odoo_changed = fields.Json(help="When each group of the partner's fields last changed in "
                                     "Odoo, to tell which side changed last")
     photo_synced = fields.Boolean(help="The photos on both sides have been compared once")

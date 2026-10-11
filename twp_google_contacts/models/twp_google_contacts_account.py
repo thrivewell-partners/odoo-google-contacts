@@ -340,6 +340,7 @@ class TwpGoogleContactsAccount(models.Model):
         Pulling first means a change made in Google is in Odoo before Odoo sends its own."""
         self.ensure_one()
         self._check_may_sync()
+        self.env.cr.cache.get("twp_google_contacts_labels", {}).pop(self.id, None)
         account = self.sudo()
         counts = Counter()
         account._pull(counts)
@@ -368,7 +369,7 @@ class TwpGoogleContactsAccount(models.Model):
         params = self.env["ir.config_parameter"].sudo()
         if params.get_param("twp_google_contacts.scope") == "tagged":
             scope_tags = account.user_id.company_id.twp_google_contacts_tag_ids
-        tag_labels = account._tag_labels(partners.category_id - scope_tags)
+        tag_labels = account._tag_labels(account._tags_out(partners.category_id, scope_tags))
         db_uuid = self.env["ir.config_parameter"].sudo().get_param("database.uuid")
         photos = account._photo_sums(partners)
         reviewing = account.candidate_ids.filtered(
@@ -403,8 +404,8 @@ class TwpGoogleContactsAccount(models.Model):
                 _logger.warning("Google Contacts: partner %s not synced for account %s: %s %s",
                                 partner.id, account.id, e.status, e.google_status)
                 continue
-            wanted = sorted({main} | {tag_labels[tag.id]
-                                      for tag in partner.category_id - scope_tags})
+            wanted = sorted({main} | {tag_labels[tag.id] for tag in partner.category_id
+                                      if tag.id in tag_labels})
             if link.state == "active" and wanted != (link.label_resource_names or []):
                 label_changes.append((link, wanted))
             self._commit_step()
@@ -863,12 +864,14 @@ class TwpGoogleContactsAccount(models.Model):
         to Odoo only takes every group Google changed, and records Google's values as the ones in
         step, since Odoo sends nothing back but its anchor.
         """
+        partner = link.partner_id.with_user(self.user_id).with_context(**{FROM_GOOGLE: True})
+        labelled = self._take_labels(link, partner, person, fill)
         if not first and link.google_hash == google_person.person_hash(person):
             # Odoo's own write coming back, or a change to something Odoo does not sync.
             if link.etag != person.get("etag"):
                 link.etag = person.get("etag")
+            counts["changed_from_google"] += labelled
             return
-        partner = link.partner_id.with_user(self.user_id).with_context(**{FROM_GOOGLE: True})
         pushed = link.pushed or {}
         synced = self._synced_groups()
         google = google_person.google_values(person, pushed)
@@ -889,7 +892,7 @@ class TwpGoogleContactsAccount(models.Model):
                     and (odoo[g] == pushed.get(g) or self._google_wins(link, partner, g, person))]
         if take:
             partner.write(self._partner_vals(google, take))
-        if self._take_photo(link, partner, person, fill) or take:
+        if self._take_photo(link, partner, person, fill) or take or labelled:
             counts["changed_from_google"] += 1
         after = google_person.partner_values(partner, html2plaintext)
         new_pushed = dict(pushed)
@@ -1059,11 +1062,15 @@ class TwpGoogleContactsAccount(models.Model):
         values = self._partner_vals(google, synced)
         values["name"] = values.get("name") or self._display_name(google)
         values["user_id"] = self.user_id.id  # Tyler's decision, 2026-10-11
-        # Labels Odoo made from tags become those tags again.
+        # Labels Odoo made from tags become those tags again, as do labels whose changes come in.
         Label = self.env["twp.google.contacts.label"].sudo()
-        labels = Label.search([("account_id", "=", self.id), ("resource_name", "in",
-                               list(google_person.label_resource_names(person)))])
-        values["category_id"] = [Command.set(labels.category_id.ids)]
+        in_google = google_person.label_resource_names(person)
+        labels = Label.search([("account_id", "=", self.id),
+                               ("resource_name", "in", list(in_google))])
+        incoming = self._labels_in()
+        tags = labels.category_id | self.env["res.partner.category"].union(*(
+            self._tag_for(incoming[r][0]) for r in in_google if r in incoming))
+        values["category_id"] = [Command.set(tags.ids)]
         partner = self.env["res.partner"].with_user(self.user_id).create(values)
         after = google_person.partner_values(partner, html2plaintext)
         if self.direction == "to_odoo":
@@ -1080,7 +1087,10 @@ class TwpGoogleContactsAccount(models.Model):
             "pushed": pushed,
             "google_hash": google_person.person_hash(person),
             "label_resource_names": sorted({self.label_resource_name}
-                                           | set(labels.mapped("resource_name"))),
+                                           | set(labels.mapped("resource_name"))
+                                           | {r for r in in_google
+                                              if r in incoming and incoming[r][1]}),
+            "google_labels": sorted(in_google & set(self._label_names())),
             "synced_at": fields.Datetime.now(),
         })
         self._take_photo(link, partner.with_context(**{FROM_GOOGLE: True}), person)
@@ -1215,27 +1225,144 @@ class TwpGoogleContactsAccount(models.Model):
         self.write({"label_name": name, "label_resource_name": resource})
         return resource
 
-    def _tag_labels(self, tags):
-        """Map each tag id to its Google label, creating labels Google does not have yet."""
+    def _tags_out(self, tags, scope_tags):
+        """The tags Odoo sends to Google as labels, with each one's label name: per its rule, or
+        the Settings default for tags with none. In tagged mode the scope tags only choose who
+        syncs; they are not labels unless a rule says so."""
+        rules = self._tag_rules()
+        default = self._default_choice("tags_default", "label")
+        names = {}
+        for tag in tags:
+            rule = rules.get(tag.id)
+            if rule:
+                if rule.direction in ("both", "to_google"):
+                    names[tag] = rule.label_name
+            elif default == "label" and tag not in scope_tags:
+                names[tag] = tag.display_name
+        return names
+
+    def _tag_rules(self):
+        return {rule.category_id.id: rule
+                for rule in self.env["twp.google.contacts.tag.rule"].sudo().search([])}
+
+    def _tag_labels(self, names):
+        """Map each tag id to its Google label, found by name or created."""
         Label = self.env["twp.google.contacts.label"].sudo()
-        known = Label.search([("account_id", "=", self.id), ("category_id", "in", tags.ids)])
-        result = {label.category_id.id: label.resource_name for label in known}
-        for tag in tags.filtered(lambda t: t.id not in result):
-            resource = self._find_or_create_label(tag.name)
-            Label.create({"account_id": self.id, "category_id": tag.id,
-                          "resource_name": resource})
+        tags = self.env["res.partner.category"].union(*names)
+        known = {label.category_id: label for label in Label.search(
+            [("account_id", "=", self.id), ("category_id", "in", tags.ids)])}
+        result = {}
+        for tag, name in names.items():
+            label = known.get(tag)
+            if label and (label.name or label.category_id.name) == name:
+                result[tag.id] = label.resource_name
+                continue
+            resource = self._find_or_create_label(name)
+            values = {"resource_name": resource, "name": name}
+            if label:
+                label.write(values)
+            else:
+                Label.create(dict(values, account_id=self.id, category_id=tag.id))
             result[tag.id] = resource
         return result
 
+    def _label_names(self):
+        """The labels the user made in Google, resource name to name, read once per sync."""
+        cache = self.env.cr.cache.setdefault("twp_google_contacts_labels", {})
+        if self.id not in cache:
+            groups = self._google_request("GET", "contactGroups", params={
+                "pageSize": 1000, "groupFields": "name,groupType"}).get("contactGroups", [])
+            cache[self.id] = {group["resourceName"]: group.get("name") for group in groups
+                              if group.get("groupType") == "USER_CONTACT_GROUP"}
+        return cache[self.id]
+
     def _find_or_create_label(self, name):
-        groups = self._google_request("GET", "contactGroups", params={
-            "pageSize": 1000, "groupFields": "name,groupType"}).get("contactGroups", [])
-        for group in groups:
-            if group.get("groupType") == "USER_CONTACT_GROUP" and group.get("name") == name:
-                return group["resourceName"]
+        labels = self._label_names()
+        for resource, label_name in labels.items():
+            if label_name == name:
+                return resource
         created = self._google_request("POST", "contactGroups",
                                        json={"contactGroup": {"name": name}})
+        labels[created["resourceName"]] = name
         return created["resourceName"]
+
+    def _labels_in(self):
+        """The labels whose changes in Google come into Odoo's tags: resource name to (the tag,
+        or the name of the tag to find or make, and whether Odoo also sends that tag as this
+        label). Per each tag's rule, or the Settings defaults for labels with none."""
+        if self.direction == "to_google":
+            return {}
+        rules = self._tag_rules()
+        by_label = {rule.label_name: rule for rule in rules.values()}
+        labels_default = self._default_choice("labels_default", "ignore")
+        tags_default = self._default_choice("tags_default", "label")
+        Label = self.env["twp.google.contacts.label"].sudo()
+        made = {label.resource_name: label.category_id for label in Label.search(
+            [("account_id", "=", self.id)]) if label.category_id.id not in rules}
+        result = {}
+        for resource, name in self._label_names().items():
+            if resource == self.label_resource_name:
+                continue
+            rule = by_label.get(name)
+            if rule:
+                if rule.direction in ("both", "to_odoo"):
+                    result[resource] = (rule.category_id, rule.direction == "both")
+            elif labels_default == "tag":
+                tag = made.get(resource) or name
+                if not (isinstance(tag, str) and self._tag_for(tag, create=False).id in rules):
+                    result[resource] = (tag, tags_default == "label")
+        return result
+
+    def _tag_for(self, tag, create=True):
+        """The tag itself, or the tag of that name, made when Odoo has none and `create`."""
+        if not isinstance(tag, str):
+            return tag
+        Tag = self.env["res.partner.category"].sudo()
+        found = Tag.search([("name", "=ilike", escape_psql(tag))], limit=1)
+        if not found and create:
+            found = Tag.create({"name": tag})
+        return found
+
+    def _take_labels(self, link, partner, person, fill=True):
+        """Bring the user's label changes in Google into the partner's tags, where a rule or the
+        Settings default lets them in. Returns whether the tags changed.
+
+        The labels the contact was in at the last sync tell what was added or removed. The first
+        time, there is no last sync, so labels only add tags. A contact linked without filling
+        (one Google already had) only has its labels noted."""
+        names = self._label_names()
+        now = google_person.label_resource_names(person) & set(names)
+        before = set(link.google_labels or [])
+        incoming = self._labels_in() if fill else {}
+        add, remove = self.env["res.partner.category"], self.env["res.partner.category"]
+        managed = set(link.label_resource_names or [])
+        for resource in now - before:
+            if resource in incoming:
+                add |= self._tag_for(incoming[resource][0])
+                if incoming[resource][1]:
+                    managed.add(resource)
+        for resource in (before - now) if link.google_labels else ():
+            if resource in incoming:
+                remove |= self._tag_for(incoming[resource][0], create=False)
+                managed.discard(resource)
+        add -= partner.category_id
+        remove &= partner.category_id
+        if add or remove:
+            partner.write({"category_id": [Command.link(t.id) for t in add]
+                           + [Command.unlink(t.id) for t in remove]})
+        values = {"google_labels": sorted(now), "label_resource_names": sorted(managed)}
+        if any(link[field] != value for field, value in values.items()):
+            link.write(values)
+        return bool(add or remove)
+
+    @api.model
+    def _labels_changed(self):
+        """Tag rules or label defaults changed: every account reads all of Google again, and
+        each contact's labels count as new, so labels that now bring tags do."""
+        accounts = self.sudo().search([])
+        accounts.write({"sync_token": False})
+        self.env["twp.google.contacts.link"].sudo().search(
+            [("account_id", "in", accounts.ids)]).write({"google_labels": False})
 
     def _apply_labels(self, changes):
         """Add and remove contacts from labels, one call per label. Only labels Odoo put a
@@ -1259,8 +1386,13 @@ class TwpGoogleContactsAccount(models.Model):
         for link, wanted in changes:
             current, wanted = set(link.label_resource_names or []), set(wanted)
             # A label whose call failed keeps its old membership, so the next sync retries it.
+            done = (current ^ wanted) - failed
             link.label_resource_names = sorted(
                 (current & wanted) | ((wanted - current) - failed) | ((current - wanted) & failed))
+            if done:
+                # Google's labels now include Odoo's change, so it is not read back as the user's.
+                google = set(link.google_labels or [])
+                link.google_labels = sorted((google | (wanted & done)) - (current & done))
         self._commit_step()
 
     def _commit_step(self):

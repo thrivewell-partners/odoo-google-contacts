@@ -325,3 +325,115 @@ class TestDetails(SyncCase, TransactionCase):
         grace = self.Partner.search([("name", "=", "Grace Hopper")])
         self.assertEqual(grace.email, "grace@navy.example")
         self.assertFalse(grace.phone)
+
+
+@tagged("post_install", "-at_install")
+class TestTagsAndLabels(SyncCase, TransactionCase):
+    """M5: rules pair tags with labels and say which way they sync."""
+
+    def setUp(self):
+        super().setUp()
+        self.params = self.env["ir.config_parameter"].sudo()
+        self.Tag = self.env["res.partner.category"]
+        self.Rule = self.env["twp.google.contacts.tag.rule"]
+        self.vip = self.Tag.create({"name": "VIP"})
+
+    def members(self, name):
+        return self.google.members.get(self.google.label(name), set())
+
+    def test_a_rule_both_ways_follows_google_label_changes(self):
+        self.Rule.create({"category_id": self.vip.id, "label_name": "Key accounts"})
+        self.ada.category_id |= self.vip
+        self.sync()
+        resource = self.link(self.ada).resource_name
+        self.assertIn(resource, self.members("Key accounts"))
+        self.assertFalse(any(g["name"] == "VIP" for g in self.google.groups.values()))
+        self.sync()
+        self.assertEqual(self.account.last_sync_result, "Nothing to change")
+
+        self.google.relabel(resource, remove=[self.google.label("Key accounts")])
+        self.sync()
+        self.assertNotIn(self.vip, self.ada.category_id)
+        self.assertNotIn(resource, self.members("Key accounts"))  # not put back
+
+        self.google.relabel(resource, add=[self.google.label("Key accounts")])
+        self.sync()
+        self.assertIn(self.vip, self.ada.category_id)
+
+    def test_a_rule_google_to_odoo_only_sends_nothing(self):
+        friends = self.Tag.create({"name": "Friends"})
+        self.Rule.create({"category_id": friends.id, "label_name": "Family",
+                          "direction": "to_odoo"})
+        self.ada.category_id |= friends
+        self.sync()
+        resource = self.link(self.ada).resource_name
+        self.assertNotIn(resource, self.members("Family"))
+        self.google.relabel(resource, add=["contactGroups/family"])
+        self.sync()
+        self.assertIn(friends, self.ada.category_id)
+        self.ada.category_id -= friends
+        self.sync()
+        self.assertIn(resource, self.members("Family"))  # Odoo never takes it out
+
+    def test_a_rule_odoo_to_google_only_ignores_google(self):
+        self.Rule.create({"category_id": self.vip.id, "label_name": "Key accounts",
+                          "direction": "to_google"})
+        self.ada.category_id |= self.vip
+        self.sync()
+        resource = self.link(self.ada).resource_name
+        self.google.relabel(resource, remove=[self.google.label("Key accounts")])
+        self.sync()
+        self.assertIn(self.vip, self.ada.category_id)
+
+    def test_tags_with_no_rule_can_stay_out_of_google(self):
+        self.params.set_param("twp_google_contacts.tags_default", "none")
+        self.ada.category_id |= self.vip
+        self.sync()
+        self.assertFalse(any(g["name"] == "VIP" for g in self.google.groups.values()))
+
+    def test_a_sub_tag_is_sent_by_its_full_name(self):
+        gold = self.Tag.create({"name": "Gold", "parent_id": self.Tag.create({"name": "Customer"}).id})
+        self.ada.category_id |= gold
+        self.sync()
+        self.assertIn(self.link(self.ada).resource_name, self.members("Customer / Gold"))
+
+    def test_google_labels_can_become_tags(self):
+        self.sync()
+        resource = self.link(self.ada).resource_name
+        settings = self.env["res.config.settings"].create({})
+        settings.twp_google_contacts_labels_default = "tag"
+        settings.execute()
+        self.assertFalse(self.account.sudo().sync_token)
+
+        self.google.relabel(resource, add=["contactGroups/family"])
+        self.sync()
+        family = self.Tag.search([("name", "=", "Family")])
+        self.assertIn(family, self.ada.category_id)
+        self.assertNotIn(self.account.label_resource_name, self.ada.category_id.mapped("name"))
+
+        self.google.relabel(resource, remove=["contactGroups/family"])
+        self.sync()
+        self.assertNotIn(family, self.ada.category_id)
+
+    def test_labels_already_there_become_tags_when_the_default_changes(self):
+        self.sync()
+        resource = self.link(self.ada).resource_name
+        self.google.relabel(resource, add=["contactGroups/family"])
+        self.sync()
+        self.assertFalse(self.Tag.search([("name", "=", "Family")]))
+        settings = self.env["res.config.settings"].create({})
+        settings.twp_google_contacts_labels_default = "tag"
+        settings.execute()
+        self.sync()
+        self.assertIn("Family", self.ada.category_id.mapped("name"))
+
+    def test_a_contact_brought_in_gets_the_tag_of_its_label(self):
+        self.Rule.create({"category_id": self.vip.id, "label_name": "Key accounts"})
+        self.google.groups["contactGroups/key"] = {"name": "Key accounts",
+                                                   "groupType": "USER_CONTACT_GROUP"}
+        self.account.sudo().import_reviewed = True
+        self.google.add(labels=["contactGroups/odoo", "contactGroups/key"],
+                        names=[{"givenName": "Grace", "familyName": "Hopper"}])
+        self.sync()
+        grace = self.Partner.search([("name", "=", "Grace Hopper")])
+        self.assertEqual(grace.category_id, self.vip)

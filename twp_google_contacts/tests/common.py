@@ -282,6 +282,14 @@ class FakePeople:
         self._touch(new)
         return new
 
+    def relabel(self, resource, add=(), remove=()):
+        """The user adds the contact to labels, or takes it out, in Google."""
+        for group in add:
+            self.members.setdefault(group, set()).add(resource)
+        for group in remove:
+            self.members.get(group, set()).discard(resource)
+        self._touch(resource)
+
     def label(self, name):
         return next(r for r, g in self.groups.items() if g["name"] == name)
 

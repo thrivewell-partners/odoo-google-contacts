@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="twp_google_contacts_tag_rule_view_list" model="ir.ui.view">
+        <field name="name">twp.google.contacts.tag.rule.list</field>
+        <field name="model">twp.google.contacts.tag.rule</field>
+        <field name="arch" type="xml">
+            <list string="Tags and labels" editable="bottom">
+                <field name="category_id"/>
+                <field name="label_name"/>
+                <field name="direction"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="twp_google_contacts_tag_rule_action" model="ir.actions.act_window">
+        <field name="name">Tags and labels</field>
+        <field name="res_model">twp.google.contacts.tag.rule</field>
+        <field name="view_mode">list</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">No rules yet: tags and labels follow the defaults in Settings</p>
+            <p>A rule pairs one Odoo tag with one Google label, and says which way it syncs. Both
+               ways: adding a contact to the label in Google adds the tag in Odoo, and taking it
+               out removes it.</p>
+        </field>
+    </record>
+</odoo>
