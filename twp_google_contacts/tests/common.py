@@ -70,6 +70,12 @@ class FakeGoogle:
         return self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
 
 
+# A client's choices in Settings, cleared before each test class.
+CHOICES = ["twp_google_contacts." + key for key in (
+    "label", "scope", "direction", "owners", "import", "details_off", "tags_default",
+    "labels_default", "conflict", "archive_deleted", "test_database")]
+
+
 class GoogleContactsCase:
     """Mixin: a configured database, a fake ThriveWell Connect, and helpers."""
 
@@ -83,6 +89,9 @@ class GoogleContactsCase:
         # test asks for batches.
         params.set_param("twp_google_contacts.write_gap", "0")
         params.set_param("twp_google_contacts.batch_from", "100000")
+        # Each test starts from the default choices, whatever the database it runs on has set.
+        for key in CHOICES:
+            params.set_param(key, False)
         cls.Account = cls.env["twp.google.contacts.account"]
 
     def setUp(self):
