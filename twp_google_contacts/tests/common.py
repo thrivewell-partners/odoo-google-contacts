@@ -1,6 +1,9 @@
+import base64
 import copy
+import io
 import json
-from datetime import timedelta
+import re
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import requests
@@ -12,12 +15,20 @@ GOOGLE = "odoo.addons.twp_google_contacts.models.twp_google_contacts_account.req
 SLEEP = "odoo.addons.twp_google_contacts.models.twp_google_contacts_account.time.sleep"
 
 
-def response(status, body=None, headers=None):
+def response(status, body=None, headers=None, raw=None):
     r = requests.Response()
     r.status_code = status
-    r._content = json.dumps(body).encode() if body is not None else b""
+    r._content = raw if raw is not None else json.dumps(body).encode() if body is not None else b""
     r.headers.update(headers or {})
     return r
+
+
+def png(color="red"):
+    """A small image, base64 encoded as Odoo keeps images."""
+    from PIL import Image
+    out = io.BytesIO()
+    Image.new("RGB", (8, 8), color).save(out, "PNG")
+    return base64.b64encode(out.getvalue())
 
 
 class FakeBroker:
@@ -101,16 +112,24 @@ class FakePeople:
         self.page_size = 1000
         self.expire_tokens = False
         self.before_write = None  # called before an update is applied, to stage a Google change
+        self.updated = {}  # resource name -> when it last changed, as Google reports it
+        self.photos = {}  # resource name -> photo address
+        self.photo_bytes = {}  # photo address -> the image
 
     def _next(self, prefix):
         self.serial += 1
         return "%s%s" % (prefix, self.serial)
 
-    def _touch(self, resource):
+    def _touch(self, resource, at=None):
         self.people[resource]["etag"] = self._next("e")
         self.changed[resource] = self.serial
+        at = at or datetime.now(timezone.utc).replace(tzinfo=None)
+        self.updated[resource] = at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     def __call__(self, method, url, params=None, json=None, timeout=None, headers=None):
+        if url.startswith("https://lh3.example/"):
+            image = self.photo_bytes.get(re.sub(r"=s\d+$", "", url))
+            return response(200, raw=image) if image else response(404, raw=b"")
         path = url.split("/v1/", 1)[1]
         params = params or {}
         if method != "GET":
@@ -155,6 +174,13 @@ class FakePeople:
                 self.people[resource][field] = copy.deepcopy(json.get(field, []))
             self._touch(resource)
             return response(200, self.view(resource))
+        if path.endswith(":updateContactPhoto"):
+            self.set_photo(resource, json["photoBytes"])
+            return response(200, {"person": self.view(resource)})
+        if path.endswith(":deleteContactPhoto"):
+            self.photos.pop(resource, None)
+            self._touch(resource)
+            return response(200, {"person": self.view(resource)})
         raise AssertionError("unexpected call %s %s" % (method, path))
 
     def _connections(self, params):
@@ -191,6 +217,14 @@ class FakePeople:
             g for g, members in self.members.items() if resource in members)
         person["memberships"] = [{"contactGroupMembership": {"contactGroupResourceName": g}}
                                  for g in groups]
+        person["metadata"] = {"sources": [{"type": "CONTACT", "etag": person.get("etag"),
+                                           "updateTime": self.updated.get(resource)}]}
+        if resource in self.photos:
+            person["photos"] = [{"url": self.photos[resource] + "=s100",
+                                 "metadata": {"primary": True, "source": {"type": "CONTACT"}}}]
+        else:
+            # Google's generated initials, which are not a photo.
+            person["photos"] = [{"url": "https://lh3.example/initials=s100", "default": True}]
         return person
 
     def add(self, labels=(), **fields):
@@ -202,14 +236,39 @@ class FakePeople:
         self._touch(resource)
         return resource
 
-    def change(self, resource, **fields):
-        """A change made by the user in Google."""
+    def change(self, resource, at=None, **fields):
+        """A change made by the user in Google, at the given time or now."""
         self.people[resource].update(fields)
+        self._touch(resource, at)
+
+    def set_photo(self, resource, image):
+        """A photo put on the contact, from base64."""
+        url = "https://lh3.example/%s" % self._next("photo")
+        self.photos[resource] = url
+        self.photo_bytes[url] = base64.b64decode(image)
         self._touch(resource)
 
     def delete(self, resource):
         del self.people[resource]
         self.deleted[resource] = self.serial = self.serial + 1
+
+    def restore(self, resource, person):
+        """The contact brought back from Google's bin."""
+        self.people[resource] = copy.deepcopy(person)
+        del self.deleted[resource]
+        self._touch(resource)
+
+    def merge(self, keep, lose):
+        """The user merges `lose` into `keep`, as Google does it (proof 6): `keep` takes the other's
+        emails and phones and keeps only its own anchor, and `lose` is deleted."""
+        for field in ("emailAddresses", "phoneNumbers"):
+            self.people[keep][field] = (self.people[keep].get(field, [])
+                                        + self.people[lose].get(field, []))
+        for members in self.members.values():
+            if lose in members:
+                members.add(keep)
+        self._touch(keep)
+        self.delete(lose)
 
     def rename(self, resource):
         """Google gives the contact a new resource name, as when it is linked to a profile."""
@@ -228,3 +287,54 @@ class FakePeople:
 
     def emails(self, resource):
         return [e["value"] for e in self.people[resource].get("emailAddresses", [])]
+
+
+ACCOUNT = "odoo.addons.twp_google_contacts.models.twp_google_contacts_account"
+
+
+class SyncCase(GoogleContactsCase):
+    """Mixin: one connected account syncing with a FakePeople, and partners to sync."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        params = cls.env["ir.config_parameter"].sudo()
+        params.set_param("twp_google_contacts.test_database", True)
+        # Only tagged partners go to Google, so the database's other partners stay out of the way.
+        params.set_param("twp_google_contacts.scope", "tagged")
+        cls.scope = cls.env["res.partner.category"].create({"name": "To Google"})
+        cls.env.user.company_id.twp_google_contacts_tag_ids = cls.scope
+        cls.Partner = cls.env["res.partner"]
+        cls.Candidate = cls.env["twp.google.contacts.candidate"]
+        cls.engines = cls.Partner.create({"name": "Lovelace Engines", "is_company": True})
+        cls.ada = cls.Partner.create({"name": "Ada Lovelace", "email": "ada@example.com",
+                                      "phone": "(317) 555-0140", "category_id": cls.scope.ids})
+
+    def setUp(self):
+        super().setUp()
+        self.google = FakePeople()
+        self.google.groups["contactGroups/odoo"] = {"name": "Odoo",
+                                                     "groupType": "USER_CONTACT_GROUP"}
+        for target, value in ((GOOGLE, self.google),
+                              (ACCOUNT + ".TwpGoogleContactsAccount._commit_step", lambda s: None)):
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.account = self.connect()
+
+    def sync(self):
+        return self.account.action_sync_now()["params"]
+
+    def link(self, partner):
+        return self.account.link_ids.filtered(lambda l: l.partner_id == partner)
+
+    def pending(self):
+        return self.account.candidate_ids.filtered(lambda c: c.state == "pending")
+
+    def grace(self, **extra):
+        """A contact the user keeps under the Odoo label in Google."""
+        fields = {"names": [{"givenName": "Grace", "familyName": "Hopper"}],
+                  "emailAddresses": [{"value": "grace@navy.example", "type": "work"}],
+                  "phoneNumbers": [{"value": "+1 317 555 0150", "type": "mobile"}]}
+        fields.update(extra)
+        return self.google.add(labels=["contactGroups/odoo"], **fields)

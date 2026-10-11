@@ -1,3 +1,4 @@
+import base64
 import logging
 import random
 import time
@@ -12,6 +13,8 @@ from odoo.tools import escape_psql, html2plaintext, plaintext2html
 
 from . import broker, google_person
 from .res_config_settings import DEFAULT_LABEL
+from .res_partner import FROM_GOOGLE
+from .twp_google_contacts_link import STOPPED
 
 _logger = logging.getLogger(__name__)
 
@@ -294,11 +297,14 @@ class TwpGoogleContactsAccount(models.Model):
 
     def _push(self, counts):
         """Send this account's partners to Google: create what is new, merge what changed in
-        Odoo, and keep labels in step with tags. Each contact is committed once Google has it."""
+        Odoo, and keep labels and photos in step. A partner archived or deleted in Odoo leaves
+        Odoo's labels in Google and is never deleted there. Each contact is committed once Google
+        has it."""
         self.ensure_one()
         account = self.sudo()
+        label_changes = account._stop_or_resume(counts)
         partners = account._partners_to_push()
-        links = {link.partner_id.id: link for link in account.link_ids}
+        links = {link.partner_id.id: link for link in account.link_ids if link.partner_id}
         main = account._main_label()
         # In tagged mode the scope tags only choose who syncs; they are not labels of their own.
         scope_tags = self.env["res.partner.category"]
@@ -307,20 +313,25 @@ class TwpGoogleContactsAccount(models.Model):
             scope_tags = account.user_id.company_id.twp_google_contacts_tag_ids
         tag_labels = account._tag_labels(partners.category_id - scope_tags)
         db_uuid = self.env["ir.config_parameter"].sudo().get_param("database.uuid")
-        label_changes = []
+        photos = account._photo_sums(partners)
         for partner in partners:
             link = links.get(partner.id)
-            if link and link.state == "gone":
-                # Deleted in Google. Never re-created without asking (proof 6).
+            if link and link.state in STOPPED:
+                # Deleted or merged away in Google. Never re-created without asking (proof 6).
                 continue
             values = google_person.partner_values(partner, html2plaintext)
             try:
                 if not link:
                     link = account._create_contact(partner, values, db_uuid)
                     counts["created"] += 1
-                elif google_person.changed_groups(values, link.pushed):
-                    if account._update_contact(link, values):
-                        counts["updated"] += 1
+                    account._push_photo(link, partner, photos.get(partner.id))
+                else:
+                    updated = (google_person.changed_groups(values, link.pushed)
+                               and account._update_contact(link, values))
+                    if link.state == "active" and account._push_photo(
+                            link, partner, photos.get(partner.id)):
+                        updated = True
+                    counts["updated"] += bool(updated)
             except GoogleApiError as e:
                 counts["failed"] += 1
                 _logger.warning("Google Contacts: partner %s not synced for account %s: %s %s",
@@ -332,7 +343,67 @@ class TwpGoogleContactsAccount(models.Model):
                 label_changes.append((link, wanted))
             self._commit_step()
         account._apply_labels(label_changes)
+        # A partner deleted in Odoo: once out of Odoo's labels, its link has nothing left to do.
+        account.link_ids.filtered(lambda l: not l.partner_id and (
+            l.state in STOPPED or not l.label_resource_names)).unlink()
         return counts
+
+    def _stop_or_resume(self, counts):
+        """A link whose partner was archived or deleted in Odoo takes the contact out of Odoo's
+        labels in Google and stops syncing. One whose partner came back from the archive first
+        takes what changed in Google meanwhile. Returns the label changes to make."""
+        changes = []
+        for link in self.link_ids.filtered(lambda l: l.state in ("active", "archived")):
+            if not link.partner_id.active:
+                if link.label_resource_names:
+                    changes.append((link, []))
+                if link.partner_id:
+                    link.state = "archived"
+            elif link.state == "archived":
+                try:
+                    person = self._get_person(link.resource_name)
+                except GoogleApiError as e:
+                    if e.status != 404:
+                        raise
+                    link.state = "gone"
+                    continue
+                link.state = "active"
+                self._take_changes(link, person, counts)
+                self._commit_step()
+        return changes
+
+    def _photo_sums(self, partners):
+        """Each partner's image, by the checksum Odoo stores it under."""
+        attachments = self.env["ir.attachment"].sudo().search_read(
+            [("res_model", "=", "res.partner"), ("res_field", "=", "image_1920"),
+             ("res_id", "in", partners.ids)], ["res_id", "checksum"])
+        return {a["res_id"]: a["checksum"] for a in attachments}
+
+    def _push_photo(self, link, partner, checksum):
+        """Send the partner's photo to Google when it changed in Odoo, or take Google's away when
+        Odoo's was removed. Returns whether Google was changed.
+
+        The hash is left as it was: the photo coming back is then compared value by value, which
+        finds it unchanged, and a change Google made meanwhile is not mistaken for Odoo's."""
+        if not link.photo_synced or (checksum or None) == (link.photo_checksum or None):
+            return False
+        result = None
+        if checksum:
+            result = self._google_request(
+                "PATCH", link.resource_name + ":updateContactPhoto",
+                json={"photoBytes": partner.image_1024.decode(),
+                      "personFields": google_person.PERSON_FIELDS,
+                      "sources": ["READ_SOURCE_TYPE_CONTACT"]})
+        elif link.photo_url:
+            result = self._google_request(
+                "DELETE", link.resource_name + ":deleteContactPhoto",
+                params={"personFields": google_person.PERSON_FIELDS,
+                        "sources": "READ_SOURCE_TYPE_CONTACT"})
+        person = (result or {}).get("person") or {}
+        link.write({"photo_checksum": checksum or False,
+                    "photo_url": google_person.photo_url(person) if result else link.photo_url,
+                    "etag": person.get("etag") or link.etag})
+        return bool(result)
 
     def _create_contact(self, partner, values, db_uuid):
         person = google_person.new_person(values, google_person.anchor(db_uuid, partner.id))
@@ -347,13 +418,18 @@ class TwpGoogleContactsAccount(models.Model):
             "pushed": values,
             "google_hash": google_person.person_hash(body),
             "label_resource_names": [],
+            "photo_synced": True,
             "synced_at": fields.Datetime.now(),
         })
 
     def _update_contact(self, link, values, anchor=None):
         """Merge the groups that changed in Odoo into the contact as Google holds it now, and
         write Odoo's anchor when given one. A stale etag means Google changed the contact
-        meanwhile: read it again and merge again (proof 3)."""
+        meanwhile: read it again and merge again (proof 3).
+
+        Google's answer becomes the hash Odoo's write is known by when it comes back, unless the
+        contact had already changed in Google in a way Odoo has not taken yet (Google's list of
+        changes runs about 30 s behind). Then no hash is kept, so that change still comes in."""
         groups = google_person.changed_groups(values, link.pushed)
         update_fields = [google_person.GROUPS[group] for group in groups]
         if anchor:
@@ -361,6 +437,7 @@ class TwpGoogleContactsAccount(models.Model):
         for attempt in range(3):
             try:
                 person = self._get_person(link.resource_name)
+                known = google_person.person_hash(person) == link.google_hash
                 body = google_person.merge(person, values, link.pushed, groups)
                 if anchor:
                     body["clientData"] = google_person.with_anchor(person, anchor)
@@ -382,7 +459,7 @@ class TwpGoogleContactsAccount(models.Model):
             "resource_name": result.get("resourceName") or link.resource_name,
             "etag": result.get("etag"),
             "pushed": values,
-            "google_hash": google_person.person_hash(result),
+            "google_hash": google_person.person_hash(result) if known else False,
             "synced_at": fields.Datetime.now(),
         })
         return True
@@ -414,101 +491,232 @@ class TwpGoogleContactsAccount(models.Model):
         if token:
             params["syncToken"] = token
         started = fields.Datetime.now()
-        seen = set()
+        seen, deleted = set(), set()
+        waiting = {}  # resource name -> person: under the label, not in Odoo yet
+        keys = defaultdict(set)  # email or phone -> the live contacts in this batch holding it
         while True:
             body = self._google_request("GET", "people/me/connections", params=params)
             for person in body.get("connections", []):
-                seen.add(person["resourceName"])
-                try:
-                    with self.env.cr.savepoint():
-                        self._take_person(person, label, counts)
-                except (GoogleApiError, AccessError, ValidationError) as e:
-                    counts["failed"] += 1
-                    _logger.warning("Google Contacts: %s not taken for account %s: %s",
-                                    person["resourceName"], self.id, e)
-                self._commit_step()
+                resource = person["resourceName"]
+                seen.add(resource)
+                if person.get("metadata", {}).get("deleted"):
+                    deleted.add(resource)
+                    continue
+                for key in google_person.person_keys(person):
+                    keys[key].add(resource)
+                self._step(resource, counts, self._take_person, person, label, counts, waiting)
             if not body.get("nextPageToken"):
                 break
             params = dict(params, pageToken=body["nextPageToken"])
+        # A full read lists every contact, so a linked one it did not list is gone too.
+        if token:
+            lost = self.link_ids.filtered(
+                lambda l: l.state in ("active", "archived") and l.resource_name in deleted)
+            dropped = self.candidate_ids.filtered(lambda c: c.resource_name in deleted)
+        else:
+            lost = self.link_ids.filtered(
+                lambda l: l.state in ("active", "archived") and l.resource_name not in seen)
+            dropped = self.candidate_ids.filtered(lambda c: c.resource_name not in seen)
+        dropped.filtered(lambda c: c.kind == "import" and c.state == "pending").unlink()
+        for link in lost:
+            self._step(link.resource_name, counts, self._lose, link, keys, waiting,
+                       not token, counts)
+        for resource, person in list(waiting.items()):
+            self._step(resource, counts, self._offer, person, counts)
         values = {"sync_token": body.get("nextSyncToken"),
                   "sync_fields": google_person.PERSON_FIELDS}
         if not token:
-            # A full read lists every contact, so a linked one it did not list was deleted.
-            missing = self.link_ids.filtered(
-                lambda l: l.state == "active" and l.resource_name not in seen)
-            missing.state = "gone"
-            counts["gone"] += len(missing)
-            self.candidate_ids.filtered(
-                lambda c: c.state == "pending" and c.resource_name not in seen).unlink()
             values["last_full_sync"] = started
         self.write(values)
         self._commit_step()
 
-    def _take_person(self, person, label, counts):
-        """One contact from Google's list: follow it to its link, or offer it for import."""
+    def _step(self, resource, counts, method, *args):
+        """Run one contact's part of a pull on its own, so one bad contact fails alone."""
+        try:
+            with self.env.cr.savepoint():
+                method(*args)
+        except (GoogleApiError, AccessError, ValidationError) as e:
+            counts["failed"] += 1
+            _logger.warning("Google Contacts: %s not taken for account %s: %s",
+                            resource, self.id, e)
+        self._commit_step()
+
+    def _take_person(self, person, label, counts, waiting):
+        """One live contact from Google's list: follow it to its link, or keep it in `waiting`
+        to be offered for import once the batch is read."""
         resource = person["resourceName"]
         names = [resource] + person.get("metadata", {}).get("previousResourceNames", [])
         Link = self.env["twp.google.contacts.link"].sudo()
         link = Link.search([("account_id", "=", self.id), ("resource_name", "in", names)],
                            limit=1)
         candidate = self.env["twp.google.contacts.candidate"].sudo().search(
-            [("account_id", "=", self.id), ("resource_name", "in", names)], limit=1)
-        if person.get("metadata", {}).get("deleted"):
-            # Deletes are not carried into Odoo yet (M4); the link only stops syncing.
-            if link.state == "active":
-                link.state = "gone"
-                counts["gone"] += 1
-            candidate.filtered(lambda c: c.state == "pending").unlink()
-            return
+            [("account_id", "=", self.id), ("kind", "=", "import"),
+             ("resource_name", "in", names)], limit=1)
         if not link:
             link = self._link_by_anchor(person)
+            if link is None:
+                return  # Odoo's partner was deleted in Odoo: not brought back from Google
         if link:
-            # Google renamed it, or it came back from the bin.
-            if link.resource_name != resource or link.state != "active":
-                link.write({"resource_name": resource, "state": "active"})
             candidate.unlink()
+            if link.resource_name != resource:
+                link.resource_name = resource  # Google renamed it
+            if not link.partner_id:
+                return  # deleted in Odoo; the push takes it out of Odoo's labels
+            if link.state in STOPPED:
+                # Back from Google's bin, or the merge undone.
+                link.state = "active"
+                if link.archived_by_sync:
+                    link.partner_id.with_context(**{FROM_GOOGLE: True}).active = True
+                    link.archived_by_sync = False
+            if link.state == "archived" or not link.partner_id.active:
+                return  # archived in Odoo; the push picks it up again if it comes back
             self._take_changes(link, person, counts, first=not link.pushed)
             return
         if not google_person.in_label(person, label):
             candidate.filtered(lambda c: c.state == "pending").unlink()
             return
-        self._offer(person, candidate, counts)
+        if candidate.resource_name and candidate.resource_name != resource:
+            candidate.resource_name = resource
+        if candidate.state != "skipped":
+            waiting[resource] = person
+
+    def _lose(self, link, keys, waiting, full, counts):
+        """A linked contact Google no longer has: deleted, or merged into another.
+
+        Google gives a merge as a bare delete of one contact and a change to the other, which took
+        its email or phone (proof 6). So a lost contact whose email or phone is now held by
+        another contact in the same batch was merged there. When that one is linked too, two Odoo
+        partners have become one Google contact, and the pair waits for the user. When it is not
+        linked and carries the same name, the link follows it. In a full read, which lists every
+        contact whether it changed or not, a shared email or phone proves less, so the user is
+        asked instead. A contact merged away is never archived and never sent back to Google.
+        """
+        if not link.partner_id:
+            link.unlink()
+            return
+        pushed = link.pushed or {}
+        held = set().union(*(keys.get(key, set()) for key in google_person.contact_keys(
+            [pushed.get("email")], [pushed.get("phone")]))) - {link.resource_name}
+        Link = self.env["twp.google.contacts.link"].sudo()
+        for resource in sorted(held):
+            survivor = Link.search([("account_id", "=", self.id), ("resource_name", "=", resource)],
+                                   limit=1)
+            if survivor:
+                if not survivor.partner_id or survivor.partner_id == link.partner_id:
+                    continue
+                link.state = "merged"
+                self._ask_merge(link, survivor)
+                return
+            person = waiting.get(resource)
+            if person is None:
+                continue  # not under the label, or kept out of Odoo
+            del waiting[resource]
+            name = (person.get("names") or [{}])[0]
+            if not full and google_person.same_name(name, pushed.get("name")):
+                self.env["twp.google.contacts.candidate"].sudo().search([
+                    ("account_id", "=", self.id), ("kind", "=", "import"),
+                    ("resource_name", "=", resource)]).unlink()
+                link.write({"resource_name": resource, "state": "active", "pushed": {},
+                            "google_hash": False, "photo_synced": False,
+                            "label_resource_names": sorted(
+                                google_person.label_resource_names(person) & self._our_labels())})
+                self._take_changes(link, person, counts, first=True)
+                counts["followed"] += 1
+                return
+            link.state = "merged"
+            self._offer(person, counts, match=(link.partner_id, "merged"))
+            return
+        link.state = "gone"
+        counts["gone"] += 1
+        self._archive_deleted(link, counts)
+
+    def _ask_merge(self, link, survivor):
+        """Ask the user whether Odoo merges the two partners Google made one contact."""
+        pushed = link.pushed or {}
+        Candidate = self.env["twp.google.contacts.candidate"].sudo()
+        values = {
+            "kind": "merge",
+            "name": link.partner_id.name,
+            "email": pushed.get("email"),
+            "phone": pushed.get("phone"),
+            "company_name": (pushed.get("organization") or {}).get("name"),
+            "match_id": link.partner_id.id,
+            "match_reason": "merged",
+            "survivor_id": survivor.partner_id.id,
+            "state": "pending",
+        }
+        candidate = Candidate.search([("account_id", "=", self.id),
+                                      ("resource_name", "=", link.resource_name)])
+        if candidate:
+            candidate.write(values)
+        else:
+            Candidate.create(dict(values, account_id=self.id, resource_name=link.resource_name))
+
+    def _archive_deleted(self, link, counts):
+        """Archive the partner of a contact deleted in Google, when Settings say so and no other
+        user's Google still has it."""
+        partner = link.partner_id
+        if not (partner.active and self.env["ir.config_parameter"].sudo().get_param(
+                "twp_google_contacts.archive_deleted")):
+            return
+        if self.env["twp.google.contacts.link"].sudo().search_count([
+                ("partner_id", "=", partner.id), ("id", "!=", link.id),
+                ("state", "in", ("active", "archived"))]):
+            return
+        try:
+            with self.env.cr.savepoint():
+                partner.with_user(self.user_id).with_context(**{FROM_GOOGLE: True}).active = False
+        except AccessError:
+            _logger.info("Google Contacts: partner %s not archived; account %s may not archive",
+                         partner.id, self.id)
+            return
+        link.archived_by_sync = True
+        counts["archived"] += 1
+
+    def _our_labels(self):
+        return {self.label_resource_name} | set(self.env["twp.google.contacts.label"].sudo().search(
+            [("account_id", "=", self.id)]).mapped("resource_name"))
 
     def _link_by_anchor(self, person):
-        """A contact Odoo once sent carries its partner id, which survives a lost link."""
+        """A contact Odoo once sent carries its partner id, which survives a lost link. None when
+        that partner was deleted in Odoo, so the contact is not brought back."""
         Link = self.env["twp.google.contacts.link"].sudo()
         db_uuid = self.env["ir.config_parameter"].sudo().get_param("database.uuid")
         partner_id = google_person.anchored_partner_id(person, db_uuid)
-        partner = self.env["res.partner"].sudo().browse(partner_id).exists() if partner_id else None
-        if not partner:
+        if not partner_id:
             return Link
+        partner = self.env["res.partner"].sudo().with_context(active_test=False).browse(
+            partner_id).exists()
+        if not partner:
+            return None
         link = Link.search([("account_id", "=", self.id), ("partner_id", "=", partner.id)])
         if link:
             return link
-        ours = {self.label_resource_name} | set(self.env["twp.google.contacts.label"].sudo().search(
-            [("account_id", "=", self.id)]).mapped("resource_name"))
         return Link.create({
             "account_id": self.id,
             "partner_id": partner.id,
             "resource_name": person["resourceName"],
             "pushed": {},
-            "label_resource_names": sorted(google_person.label_resource_names(person) & ours),
+            "label_resource_names": sorted(
+                google_person.label_resource_names(person) & self._our_labels()),
         })
 
     def _take_changes(self, link, person, counts, first=False):
         """Bring the contact's changes into its partner, group by group.
 
-        A group Google changed comes into Odoo unless Odoo changed it too, in which case Odoo's
-        stands and the push merges it into Google (most-recent-wins is M4). On a first link,
-        Google only fills what the partner lacks; where both have a value and they differ, Odoo's
-        is added to Google's list beside Google's own, so neither is lost.
+        A group Google changed comes into Odoo. When Odoo changed it too, the Settings rule
+        decides: by default the side that changed it last, judged by Google's update time for the
+        contact and the time Odoo noted for that group. When Odoo's stands, the push merges it
+        into Google. On a first link, Google only fills what the partner lacks; where both have a
+        value and they differ, Odoo's is added to Google's list beside Google's own, so neither
+        is lost. The photo follows the same rules.
         """
         if not first and link.google_hash == google_person.person_hash(person):
             # Odoo's own write coming back, or a change to something Odoo does not sync.
             if link.etag != person.get("etag"):
                 link.etag = person.get("etag")
             return
-        partner = link.partner_id.with_user(self.user_id)
+        partner = link.partner_id.with_user(self.user_id).with_context(**{FROM_GOOGLE: True})
         pushed = link.pushed or {}
         google = google_person.google_values(person, pushed)
         odoo = google_person.partner_values(partner, html2plaintext)
@@ -517,15 +725,16 @@ class TwpGoogleContactsAccount(models.Model):
         else:
             # A partner keeps its name when Google's is cleared.
             take = [g for g in google_person.GROUPS
-                    if google[g] != pushed.get(g) and odoo[g] == pushed.get(g)
-                    and (google[g] is not None or g != "name")]
+                    if google[g] != pushed.get(g) and (google[g] is not None or g != "name")
+                    and (odoo[g] == pushed.get(g) or self._google_wins(link, partner, g, person))]
         if take:
             partner.write(self._partner_vals(google, take))
+        if self._take_photo(link, partner, person) or take:
             counts["changed_from_google"] += 1
         after = google_person.partner_values(partner, html2plaintext)
         new_pushed = dict(pushed)
         for group in google_person.GROUPS:
-            if group in take:
+            if group in take or (not first and after[group] == google[group]):
                 new_pushed[group] = after[group]
             elif first:
                 new_pushed[group] = after[group] if after[group] == google[group] else None
@@ -536,12 +745,71 @@ class TwpGoogleContactsAccount(models.Model):
             db_uuid = self.env["ir.config_parameter"].sudo().get_param("database.uuid")
             self._update_contact(link, after, google_person.anchor(db_uuid, partner.id))
 
-    def _offer(self, person, candidate, counts):
+    def _google_wins(self, link, partner, group, person):
+        """Whether Google's value stands for a group both sides changed."""
+        rule = self.env["ir.config_parameter"].sudo().get_param(
+            "twp_google_contacts.conflict") or "latest"
+        if rule != "latest":
+            return rule == "google"
+        google_time = google_person.update_time(person)
+        stamp = (link.odoo_changed or {}).get(group)
+        odoo_time = fields.Datetime.to_datetime(stamp) if stamp else partner.write_date
+        return bool(google_time) and (not odoo_time or google_time > odoo_time)
+
+    def _take_photo(self, link, partner, person):
+        """Bring Google's photo into the partner when it changed in Google, or, the first time
+        the two are compared, when the partner has none. Returns whether the partner changed.
+
+        The first comparison keeps both photos where both have one, and leaves a photo only Odoo
+        has for the push to send."""
+        url = google_person.photo_url(person)
+        checksum = self._photo_sums(partner).get(partner.id)
+        if not link.photo_synced:
+            if not url or checksum:
+                link.write({"photo_synced": True, "photo_url": url or False,
+                            "photo_checksum": url and checksum or False})
+                return False
+        elif url == (link.photo_url or None) or (
+                (checksum or None) != (link.photo_checksum or None)
+                and not self._google_wins(link, partner, "photo", person)):
+            return False
+        data = self._download_photo(url) if url else False
+        if data is None:
+            return False  # Google did not hand it over; the next change to the contact retries
+        changed = False
+        try:
+            with self.env.cr.savepoint():
+                partner.image_1920 = data
+            changed = bool(data or checksum)
+        except UserError as e:
+            _logger.warning("Google Contacts: photo of %s not taken for account %s: %s",
+                            link.resource_name, self.id, e)
+        link.write({"photo_synced": True, "photo_url": url or False,
+                    "photo_checksum": self._photo_sums(partner).get(partner.id) or False})
+        return changed
+
+    def _download_photo(self, url):
+        try:
+            response = requests.request("GET", google_person.photo_download_url(url),
+                                        timeout=TIMEOUT)
+        except requests.RequestException as e:
+            _logger.info("Google Contacts: photo not downloaded: %s", type(e).__name__)
+            return None
+        if response.status_code != 200 or not response.content:
+            _logger.info("Google Contacts: photo not downloaded: HTTP %s", response.status_code)
+            return None
+        return base64.b64encode(response.content)
+
+    def _offer(self, person, counts, match=None):
         """A Google contact under the label that Odoo does not know. Before the first review, and
-        whenever it looks like a partner Odoo has, it waits for the user; otherwise it is added."""
+        whenever it looks like a partner Odoo has, it waits for the user; otherwise it is added.
+        `match` is the partner and reason when the caller already knows them."""
+        candidate = self.env["twp.google.contacts.candidate"].sudo().search(
+            [("account_id", "=", self.id), ("kind", "=", "import"),
+             ("resource_name", "=", person["resourceName"])])
         if candidate.state == "skipped":
             return
-        match, reason = self._match(person)
+        match, reason = match or self._match(person)
         if not match and self.import_reviewed:
             candidate.unlink()
             self._create_from_google(person)
@@ -556,7 +824,7 @@ class TwpGoogleContactsAccount(models.Model):
             "match_reason": reason,
             "state": "pending",
         }
-        if not candidate.match_id:
+        if not candidate.match_id or reason == "merged":
             values["match_id"] = match.id
         if candidate:
             candidate.write(values)
@@ -615,6 +883,7 @@ class TwpGoogleContactsAccount(models.Model):
                                            | set(labels.mapped("resource_name"))),
             "synced_at": fields.Datetime.now(),
         })
+        self._take_photo(link, partner.with_context(**{FROM_GOOGLE: True}), person)
         db_uuid = params.get_param("database.uuid")
         self._update_contact(link, pushed, google_person.anchor(db_uuid, partner.id))
         return partner
@@ -628,6 +897,17 @@ class TwpGoogleContactsAccount(models.Model):
         self._main_label()
         Link = self.env["twp.google.contacts.link"].sudo()
         for candidate in candidates:
+            if candidate.kind == "merge":
+                if decision == "skip":
+                    # Not a merge after all: the contact was deleted in Google.
+                    link = Link.search([("account_id", "=", self.id),
+                                        ("resource_name", "=", candidate.resource_name),
+                                        ("state", "=", "merged")])
+                    if link:
+                        link.state = "gone"
+                        self._archive_deleted(link, Counter())
+                    candidate.state = "skipped"
+                continue
             if decision == "skip":
                 candidate.state = "skipped"
                 continue
@@ -640,24 +920,27 @@ class TwpGoogleContactsAccount(models.Model):
                 continue
             partner = candidate.match_id if decision == "link" else None
             if partner:
-                if Link.search_count([("account_id", "=", self.id),
-                                      ("partner_id", "=", partner.id)]):
+                link = Link.search([("account_id", "=", self.id),
+                                    ("partner_id", "=", partner.id)])
+                if link.state in ("active", "archived"):
                     raise UserError(self.env._(
                         "%(name)s is already linked to another Google contact.",
                         name=partner.display_name))
-                link = Link.create({
-                    "account_id": self.id,
-                    "partner_id": partner.id,
-                    "resource_name": person["resourceName"],
-                    "pushed": {},
-                    "label_resource_names": [self.label_resource_name],
-                })
+                values = {"resource_name": person["resourceName"], "state": "active",
+                          "pushed": {}, "google_hash": False, "photo_synced": False,
+                          "archived_by_sync": False,
+                          "label_resource_names": [self.label_resource_name]}
+                if link:
+                    # Its own Google contact is gone, merged into this one or deleted.
+                    link.write(values)
+                else:
+                    link = Link.create(dict(values, account_id=self.id, partner_id=partner.id))
                 self._take_changes(link, person, Counter(), first=True)
             else:
                 self._create_from_google(person)
             candidate.state = "done"
             self._commit_step()
-        if not self.candidate_ids.filtered(lambda c: c.state == "pending"):
+        if not self.candidate_ids.filtered(lambda c: c.state == "pending" and c.kind == "import"):
             self.import_reviewed = True
 
     def _partner_vals(self, google, groups):
@@ -791,6 +1074,8 @@ class TwpGoogleContactsAccount(models.Model):
             (counts["changed_from_google"], _("%(n)s updated from Google")),
             (counts["created"], _("%(n)s sent to Google")),
             (counts["updated"], _("%(n)s updated in Google")),
+            (counts["followed"], _("%(n)s followed into a merge in Google")),
+            (counts["archived"], _("%(n)s archived after a delete in Google")),
             (self.review_count, _("%(n)s waiting for your review")),
             (counts["failed"], _("%(n)s failed")),
         ]

@@ -12,19 +12,26 @@
                     <button name="action_create" type="object" string="Add as new"/>
                     <button name="action_skip" type="object" string="Keep out of Odoo"/>
                 </header>
+                <field name="kind" column_invisible="1"/>
                 <field name="name"/>
                 <field name="email"/>
                 <field name="phone"/>
                 <field name="company_name" optional="show"/>
-                <field name="match_id" readonly="state != 'pending'"
+                <field name="match_id" readonly="state != 'pending' or kind == 'merge'"
                        placeholder="New contact" options="{'no_create': True}"/>
                 <field name="match_reason"/>
+                <field name="survivor_id" optional="show" invisible="kind != 'merge'"/>
                 <field name="state" widget="badge" decoration-info="state == 'pending'"
                        decoration-success="state == 'done'"/>
                 <button name="action_link" type="object" string="Accept" icon="fa-check"
-                        invisible="state != 'pending'"/>
+                        invisible="state != 'pending' or kind != 'import'"/>
                 <button name="action_skip" type="object" string="Keep out of Odoo" icon="fa-ban"
-                        invisible="state != 'pending'"/>
+                        invisible="state != 'pending' or kind != 'import'"/>
+                <button name="action_merge" type="object" string="Merge in Odoo" icon="fa-compress"
+                        invisible="state != 'pending' or kind != 'merge'"/>
+                <button name="action_skip" type="object" string="Not a merge" icon="fa-ban"
+                        invisible="state != 'pending' or kind != 'merge'"
+                        help="Treat it as a contact deleted in Google, and keep both Odoo contacts"/>
             </list>
         </field>
     </record>
@@ -39,6 +46,8 @@
                 <field name="phone"/>
                 <filter name="pending" string="To review" domain="[('state', '=', 'pending')]"/>
                 <filter name="skipped" string="Kept out of Odoo" domain="[('state', '=', 'skipped')]"/>
+                <separator/>
+                <filter name="merges" string="Merged in Google" domain="[('kind', '=', 'merge')]"/>
             </search>
         </field>
     </record>

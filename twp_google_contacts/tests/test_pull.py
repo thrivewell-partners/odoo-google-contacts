@@ -1,59 +1,14 @@
-from unittest.mock import patch
+from datetime import timedelta
 
+from odoo import fields
 from odoo.exceptions import AccessError
 from odoo.tests import TransactionCase, new_test_user, tagged
 
-from .common import GOOGLE, FakePeople, GoogleContactsCase
-
-ACCOUNT = "odoo.addons.twp_google_contacts.models.twp_google_contacts_account"
+from .common import SyncCase
 
 
 @tagged("post_install", "-at_install")
-class TestPull(GoogleContactsCase, TransactionCase):
-
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        params = cls.env["ir.config_parameter"].sudo()
-        params.set_param("twp_google_contacts.test_database", True)
-        # Only tagged partners go to Google, so the database's other partners stay out of the way.
-        params.set_param("twp_google_contacts.scope", "tagged")
-        cls.scope = cls.env["res.partner.category"].create({"name": "To Google"})
-        cls.env.user.company_id.twp_google_contacts_tag_ids = cls.scope
-        cls.Partner = cls.env["res.partner"]
-        cls.Candidate = cls.env["twp.google.contacts.candidate"]
-        cls.engines = cls.Partner.create({"name": "Lovelace Engines", "is_company": True})
-        cls.ada = cls.Partner.create({"name": "Ada Lovelace", "email": "ada@example.com",
-                                      "phone": "(317) 555-0140", "category_id": cls.scope.ids})
-
-    def setUp(self):
-        super().setUp()
-        self.google = FakePeople()
-        self.google.groups["contactGroups/odoo"] = {"name": "Odoo",
-                                                     "groupType": "USER_CONTACT_GROUP"}
-        for target, value in ((GOOGLE, self.google),
-                              (ACCOUNT + ".TwpGoogleContactsAccount._commit_step", lambda s: None)):
-            patcher = patch(target, value)
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        self.account = self.connect()
-
-    def sync(self):
-        return self.account.action_sync_now()["params"]
-
-    def link(self, partner):
-        return self.account.link_ids.filtered(lambda l: l.partner_id == partner)
-
-    def pending(self):
-        return self.account.candidate_ids.filtered(lambda c: c.state == "pending")
-
-    def grace(self, **extra):
-        """A contact the user keeps under the Odoo label in Google."""
-        fields = {"names": [{"givenName": "Grace", "familyName": "Hopper"}],
-                  "emailAddresses": [{"value": "grace@navy.example", "type": "work"}],
-                  "phoneNumbers": [{"value": "+1 317 555 0150", "type": "mobile"}]}
-        fields.update(extra)
-        return self.google.add(labels=["contactGroups/odoo"], **fields)
+class TestPull(SyncCase, TransactionCase):
 
     # The first import.
 
@@ -195,10 +150,11 @@ class TestPull(GoogleContactsCase, TransactionCase):
         self.assertIn("1 updated from Google", result["message"])
         self.assertEqual(self.google.writes, [])
 
-    def test_when_both_changed_odoos_change_stands(self):
+    def test_when_both_changed_odoos_later_change_stands(self):
         self.sync()
         resource = self.link(self.ada).resource_name
-        self.google.change(resource, emailAddresses=[{"value": "ada@google-side.example"}])
+        self.google.change(resource, at=fields.Datetime.now() - timedelta(hours=1),
+                           emailAddresses=[{"value": "ada@google-side.example"}])
         self.ada.email = "ada@odoo-side.example"
         self.sync()
         self.assertEqual(self.ada.email, "ada@odoo-side.example")

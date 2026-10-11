@@ -29,6 +29,14 @@
                             <label for="twp_google_contacts_label" class="col-lg-4 o_light_label"/>
                             <field name="twp_google_contacts_label"/>
                         </div>
+                        <div class="row">
+                            <label for="twp_google_contacts_conflict" class="col-lg-4 o_light_label"/>
+                            <field name="twp_google_contacts_conflict"/>
+                        </div>
+                        <div class="row">
+                            <label for="twp_google_contacts_archive_deleted" class="col-lg-4 o_light_label"/>
+                            <field name="twp_google_contacts_archive_deleted"/>
+                        </div>
                         <div class="row" groups="base.group_no_one">
                             <label for="twp_google_contacts_test_database" class="col-lg-4 o_light_label"/>
                             <field name="twp_google_contacts_test_database"/>

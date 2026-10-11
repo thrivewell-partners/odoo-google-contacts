@@ -8,6 +8,7 @@ Odoo last sent, kept on the link. Coming back, the same item is the one read int
 import hashlib
 import json
 import re
+from datetime import datetime
 
 ANCHOR_KEY = "thrivewell.anchor"
 
@@ -21,7 +22,20 @@ GROUPS = {
     "website": "urls",
     "note": "biographies",
 }
-PERSON_FIELDS = ",".join(list(GROUPS.values()) + ["clientData", "memberships", "metadata"])
+PERSON_FIELDS = ",".join(list(GROUPS.values())
+                         + ["clientData", "memberships", "metadata", "photos"])
+
+# The partner fields behind each group, and behind the photo, to tell which a write changed.
+PARTNER_FIELDS = {
+    "name": {"name"},
+    "organization": {"parent_id", "function"},
+    "email": {"email"},
+    "phone": {"phone"},
+    "address": {"street", "street2", "city", "zip", "state_id", "country_id"},
+    "website": {"website"},
+    "note": {"comment"},
+    "photo": {"image_1920"},
+}
 
 # Output-only parts of a list item. Sending them back is at best ignored.
 OUTPUT_ONLY = ("metadata", "formattedType", "canonicalForm", "formattedValue")
@@ -294,10 +308,58 @@ MERGERS = {
 }
 
 
+def groups_written(vals):
+    """The groups, and "photo", whose partner fields a write touches."""
+    return [group for group, names in PARTNER_FIELDS.items() if names & set(vals)]
+
+
+def update_time(person):
+    """When the contact last changed in Google, as a naive UTC datetime, or None."""
+    for source in person.get("metadata", {}).get("sources", []):
+        if source.get("type") == "CONTACT" and source.get("updateTime"):
+            # RFC 3339 with up to nine decimals: keep the seconds.
+            return datetime.strptime(source["updateTime"][:19], "%Y-%m-%dT%H:%M:%S")
+    return None
+
+
+def photo_url(person):
+    """The contact's own photo, or None. Google's generated initials are not a photo."""
+    return next((photo.get("url") for photo in person.get("photos", [])
+                 if photo.get("url") and not photo.get("default")), None)
+
+
+def photo_download_url(url, size=1024):
+    """Google's photo address at the given size: its "=s100" ending changes, or "sz" is added."""
+    if re.search(r"=s\d+[^/=?]*$", url):
+        return re.sub(r"=s\d+[^/=?]*$", "=s%s" % size, url)
+    return url + ("&" if "?" in url else "?") + "sz=%s" % size
+
+
+def contact_keys(emails=(), phones=()):
+    """What makes two contacts look like one person: their emails, ignoring case, and the last ten
+    digits of their phone numbers."""
+    keys = {"e:" + e.strip().lower() for e in emails if e and e.strip()}
+    keys |= {"p:" + tail for tail in map(phone_tail, filter(None, phones)) if tail}
+    return keys
+
+
+def person_keys(person):
+    return contact_keys([i.get("value") for i in person.get("emailAddresses", [])],
+                        [i.get("value") for i in person.get("phoneNumbers", [])])
+
+
+def same_name(a, b):
+    def words(name):
+        return " ".join(filter(None, ((name or {}).get("givenName"),
+                                      (name or {}).get("familyName")))).lower().split()
+    return bool(words(a)) and words(a) == words(b)
+
+
 def person_hash(person):
-    """A hash of the fields Odoo syncs, as Google holds them. Equal hashes after a sync mean the
-    change Google reports is Odoo's own write coming back (proof 5)."""
+    """A hash of the fields Odoo syncs, and the photo, as Google holds them. Equal hashes after a
+    sync mean the change Google reports is Odoo's own write coming back (proof 5)."""
     projection = {}
     for field in GROUPS.values():
         projection[field] = [_clean(item) for item in person.get(field, [])]
+    projection["photo"] = photo_url(person)
     return hashlib.sha256(json.dumps(projection, sort_keys=True).encode()).hexdigest()[:32]

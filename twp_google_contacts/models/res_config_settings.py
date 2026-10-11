@@ -29,6 +29,20 @@ class ResConfigSettings(models.TransientModel):
         default="contactable")
     twp_google_contacts_tag_ids = fields.Many2many(
         related="company_id.twp_google_contacts_tag_ids", readonly=False)
+    twp_google_contacts_conflict = fields.Selection(
+        [("latest", "The most recent change"),
+         ("odoo", "Odoo's"),
+         ("google", "Google's")],
+        string="When both changed, keep",
+        config_parameter="twp_google_contacts.conflict",
+        default="latest",
+        help="When a contact's email, phone, address or other detail changed in both Odoo and "
+             "Google since the last sync, which one stays.")
+    twp_google_contacts_archive_deleted = fields.Boolean(
+        string="Archive in Odoo when deleted in Google",
+        config_parameter="twp_google_contacts.archive_deleted",
+        help="Off, a contact deleted in Google stays in Odoo and only stops syncing. A contact "
+             "Google merged into another is never archived; it waits for review.")
     twp_google_contacts_test_database = fields.Boolean(
         string="Sync from this copy",
         config_parameter="twp_google_contacts.test_database",
