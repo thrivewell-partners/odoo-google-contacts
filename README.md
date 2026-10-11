@@ -5,7 +5,7 @@ ways, through ThriveWell's verified Google app. Built in milestones; the status 
 
 | Module | Status | What it does |
 |---|---|---|
-| `twp_google_contacts` | M3 of 5: connect, Odoo to Google, and Google to Odoo | Each user connects their own Google account from Odoo. Contacts sync both ways on a schedule, with Google's lists merged rather than replaced, deletes off unless the admin turns them on, and only Google contacts under one label coming into Odoo |
+| `twp_google_contacts` | M4 of 5: connect, both directions, and the two-way rules | Each user connects their own Google account from Odoo. Contacts sync both ways on a schedule, with Google's lists merged rather than replaced, deletes off unless the admin turns them on, and only Google contacts under one label coming into Odoo |
 
 This repo is the master copy. Releases are copied into each client's code repo, which is that
 client's addons path on Oduflow.
@@ -28,6 +28,22 @@ waits on a review list, reached from the user's preferences, with the Odoo conta
 is: the same email, then the same phone number. The user accepts the match, picks another, adds it
 as new, or keeps it out. After that review, new contacts under the label that match nothing are
 added on their own, and any that look like a contact Odoo already has still wait for the user.
+
+## When both sides change
+
+* **The later change wins**, for each group of details (name, company and job title, email, phone,
+  address, website, notes, photo). Odoo notes when each group changes; Google gives the time the
+  contact last changed. Settings can instead always keep Odoo's, or always Google's. A group only
+  one side changed simply comes across.
+* **Deletes.** A contact deleted in Google stops syncing and stays in Odoo, unless Settings turn on
+  "Archive in Odoo when deleted in Google". A contact archived or deleted in Odoo is taken out of
+  Odoo's labels in Google and is never deleted there; brought back from the archive, it picks up
+  what changed in Google meanwhile.
+* **Google merges.** Google reports a merge as a delete of one contact and a change to the other.
+  When the other one now holds the lost contact's email or phone, it is treated as a merge, never
+  a delete. Two linked contacts merged in Google wait on the review list, where "Merge in Odoo"
+  opens Odoo's own merge. A contact merged into an unlinked duplicate of the same name is followed.
+* **Photos** sync both ways. Google's generated initials are not a photo.
 
 ## Design
 
