@@ -9,6 +9,10 @@ from .common import GoogleContactsCase
 @tagged("post_install", "-at_install")
 class TestConnect(GoogleContactsCase, TransactionCase):
 
+    def mine(self):
+        # Other users' real connections may exist on the database the tests run on.
+        return self.Account.search([("user_id", "=", self.env.uid)])
+
     def test_start_sends_return_address_and_state_with_the_key(self):
         url = self.Account._connect_start("http://odoo.test" + RETURN_PATH, "s1")
         self.assertTrue(url.startswith("https://accounts.google.com/"))
@@ -50,14 +54,14 @@ class TestConnect(GoogleContactsCase, TransactionCase):
         self.connect()
         self.env.user.action_google_contacts_disconnect()
         self.assertEqual(self.broker.paths()[-1], "/v1/disconnect")
-        self.assertFalse(self.Account.search([]))
+        self.assertFalse(self.mine())
         self.assertEqual(self.env.user.google_contacts_state, "none")
 
     def test_disconnect_of_a_connection_the_broker_lost_still_forgets(self):
         self.connect()
         self.broker.answers["/v1/disconnect"] = (404, {"error": "unknown_connection"})
         self.env.user.action_google_contacts_disconnect()
-        self.assertFalse(self.Account.search([]))
+        self.assertFalse(self.mine())
 
     def test_disconnect_that_cannot_revoke_keeps_the_connection(self):
         account = self.connect()
@@ -112,8 +116,16 @@ class TestConnect(GoogleContactsCase, TransactionCase):
 @tagged("post_install", "-at_install")
 class TestReturnPage(GoogleContactsCase, HttpCase):
 
+    def setUp(self):
+        super().setUp()
+        self.user = new_test_user(self.env, "returner", password="returner-pass-1",
+                                  groups="base.group_user")
+
+    def mine(self):
+        return self.Account.search([("user_id", "=", self.user.id)])
+
     def back_from_google(self, session_state, **params):
-        self.authenticate("admin", "admin")
+        self.authenticate("returner", "returner-pass-1")
         if session_state:
             self.session[SESSION_KEY] = session_state
             self.session.is_dirty = True
@@ -126,7 +138,7 @@ class TestReturnPage(GoogleContactsCase, HttpCase):
         self.assertEqual(res.status_code, 200)
         self.assertIn("connected to test@example.com", res.text)
         self.assertEqual(res.headers["Referrer-Policy"], "no-referrer")
-        self.assertEqual(self.Account.search([]).user_id.login, "admin")
+        self.assertEqual(self.mine().google_email, "test@example.com")
 
     def test_return_from_another_session_is_refused(self):
         res = self.back_from_google("s1", state="someone-elses", twc_code="handoff")
@@ -136,4 +148,4 @@ class TestReturnPage(GoogleContactsCase, HttpCase):
     def test_unticked_contacts_box_is_explained(self):
         res = self.back_from_google("s1", state="s1", twc_error="scope_not_granted")
         self.assertIn("tick the box", res.text)
-        self.assertFalse(self.Account.search([]))
+        self.assertFalse(self.mine())
