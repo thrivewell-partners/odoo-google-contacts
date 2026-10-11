@@ -97,6 +97,7 @@ class TwpGoogleContactsAccount(models.Model):
 
     _user_unique = models.Constraint("UNIQUE(user_id)", "A user connects one Google account.")
 
+    @api.depends("candidate_ids.state")
     def _compute_review_count(self):
         counts = dict(self.env["twp.google.contacts.candidate"].sudo()._read_group(
             [("account_id", "in", self.ids), ("state", "=", "pending")],
