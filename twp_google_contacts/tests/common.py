@@ -186,7 +186,7 @@ class FakePeople:
 
     def view(self, resource):
         """The person as Google returns it, with its labels."""
-        person = copy.deepcopy(self.people[resource])
+        person = dict(copy.deepcopy(self.people[resource]), resourceName=resource)
         groups = ["contactGroups/myContacts"] + sorted(
             g for g, members in self.members.items() if resource in members)
         person["memberships"] = [{"contactGroupMembership": {"contactGroupResourceName": g}}

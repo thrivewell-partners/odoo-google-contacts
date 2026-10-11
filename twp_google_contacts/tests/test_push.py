@@ -54,7 +54,9 @@ class TestPush(GoogleContactsCase, TransactionCase):
         label = self.account.label_resource_name
         self.assertEqual(self.google.groups[label]["name"], "Odoo")
         self.assertIn(link.resource_name, self.google.members[label])
-        self.assertEqual(link.etag, person["etag"])
+        # Labelling moves the etag; the next pull brings the link up to date.
+        self.push()
+        self.assertEqual(link.etag, self.google.people[link.resource_name]["etag"])
 
     def test_companies_colleagues_and_unreachable_people_stay_out(self):
         self.push()
