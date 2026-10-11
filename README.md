@@ -5,7 +5,10 @@ ways, through ThriveWell's verified Google app. Built in milestones; the status 
 
 | Module | Status | What it does |
 |---|---|---|
-| `twp_google_contacts` | M5 of 6: connect, both directions, the two-way rules, and each client's choices | Each user connects their own Google account from Odoo. Contacts sync both ways, or one way, on a schedule, with Google's lists merged rather than replaced, deletes off unless the admin turns them on, and only Google contacts under one label coming into Odoo |
+| `twp_google_contacts` | M6 of 6, built: connect, both directions, the two-way rules, each client's choices, and hardening | Each user connects their own Google account from Odoo. Contacts sync both ways, or one way, on a schedule, with Google's lists merged rather than replaced, deletes off unless the admin turns them on, and only Google contacts under one label coming into Odoo |
+| `twp_google_contacts_mail` | Built with M6 | Installs itself when Discuss is installed. Notes in a contact's chatter what the sync changed, added, linked or archived, and whose Google it came from |
+
+The client setup guide is [docs/setup-guide.md](docs/setup-guide.md).
 
 This repo is the master copy. Releases are copied into each client's code repo, which is that
 client's addons path on Oduflow.
@@ -69,6 +72,26 @@ Not every client uses Google Contacts and Odoo the same way, so these are settin
 * **Other fields.** A list pairs any Odoo contact field, Studio's included, with a place in Google:
   a custom field, the birthday, a nickname, a phone or email of a given type (such as the mobile
   Odoo 19 no longer has), or an ID. Odoo writes only the custom fields named there.
+
+## Limits, time and the log
+
+* **Google's limits.** Google limits how fast one account may change, per minute and per day, and
+  publishes no numbers. The module spaces each account's writes out (0.7 s apart by default) and
+  waits a refusal out past a whole minute. Still refused, the sync stops, keeps what it did, and
+  the scheduled job takes it up again five minutes later, or six hours later for the daily limit.
+  Many new contacts (20 or more by default) go to Google in batches of 200.
+* **Odoo's time limit.** A sync uses at most 60% of Odoo's time limit for a request or a scheduled
+  job, then stops and keeps what it did. The scheduled job runs again straight away for the rest,
+  and takes each account only when it is due, so a large first sync spreads over several runs.
+* **The sync log.** Every sync of every account, scheduled or Sync now, is logged for 90 days with
+  what it changed each way and each contact that failed, with Google's reason. Administrators
+  open it from Settings or from the list of connected accounts. A failing account never stops the
+  others, and the scheduled job never fails as a whole, so Odoo never switches it off.
+* **Uninstalling** gives every Google connection back to ThriveWell Connect, which revokes it at
+  Google, then removes the module's settings; Odoo drops its tables. A copied database gives
+  nothing back, since its connections are the original's. When ThriveWell Connect cannot be
+  reached, the uninstall stops rather than leave Google access behind. The contacts, the label and
+  the hidden anchor stay in Google, so a later install finds its contacts again.
 
 ## Design
 
