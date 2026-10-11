@@ -355,11 +355,15 @@ class TwpGoogleContactsAccount(models.Model):
         tag_labels = account._tag_labels(partners.category_id - scope_tags)
         db_uuid = self.env["ir.config_parameter"].sudo().get_param("database.uuid")
         photos = account._photo_sums(partners)
+        reviewing = account.candidate_ids.filtered(
+            lambda c: c.kind == "import" and c.state == "pending").match_id
         for partner in partners:
             link = links.get(partner.id)
             if link and link.state in STOPPED:
                 # Deleted or merged away in Google. Never re-created without asking (proof 6).
                 continue
+            if not link and partner in reviewing:
+                continue  # the likely match of a Google contact: the user's review links them
             values = google_person.partner_values(partner, html2plaintext)
             try:
                 twin = not link and account._twin(partner, values)
@@ -619,7 +623,9 @@ class TwpGoogleContactsAccount(models.Model):
             return None
         found = self.env["twp.google.contacts.key"].sudo().search(
             [("account_id", "=", self.id), ("key", "in", [self._key_hash(k) for k in keys])])
-        linked = set(self.link_ids.mapped("resource_name"))
+        # Linked already, waiting for the user's review, or kept out of Odoo by the user.
+        linked = set(self.link_ids.mapped("resource_name")) | set(self.candidate_ids.filtered(
+            lambda c: c.kind == "import" and c.state in ("pending", "skipped")).mapped("resource_name"))
         db_uuid = self.env["ir.config_parameter"].sudo().get_param("database.uuid")
         for resource in sorted(set(found.mapped("resource_name")) - linked):
             try:

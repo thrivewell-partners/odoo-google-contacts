@@ -252,9 +252,22 @@ class TestOwnership(SyncCase, TransactionCase):
 
     def test_a_contact_anchored_to_another_partner_is_not_a_twin(self):
         db_uuid = self.env["ir.config_parameter"].sudo().get_param("database.uuid")
-        self.google.add(emailAddresses=[{"value": "ada@example.com"}],
-                        clientData=[{"key": "thrivewell.anchor",
-                                     "value": "odoo:%s:res.partner:%s" % (db_uuid, self.mine.id)}])
+        deleted = self.Partner.create({"name": "Deleted Since"})
+        anchored = self.google.add(
+            emailAddresses=[{"value": "ada@example.com"}],
+            clientData=[{"key": "thrivewell.anchor",
+                         "value": "odoo:%s:res.partner:%s" % (db_uuid, deleted.id)}])
+        deleted.unlink()
         self.sync()
-        self.assertTrue(self.link(self.ada))
+        self.assertNotEqual(self.link(self.ada).resource_name, anchored)
         self.assertEqual(len(self.google.people), 3)
+
+    def test_a_contact_kept_out_of_odoo_is_not_a_twin(self):
+        kept_out = self.google.add(labels=["contactGroups/odoo"],
+                                   names=[{"givenName": "Ada", "familyName": "Elsewhere"}],
+                                   emailAddresses=[{"value": "ada@example.com"}])
+        self.sync()
+        self.assertFalse(self.link(self.ada))  # waits for the review, which matched it
+        self.pending().action_skip()
+        self.sync()
+        self.assertNotEqual(self.link(self.ada).resource_name, kept_out)
