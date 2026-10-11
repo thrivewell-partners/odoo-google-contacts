@@ -5,7 +5,7 @@ ways, through ThriveWell's verified Google app. Built in milestones; the status 
 
 | Module | Status | What it does |
 |---|---|---|
-| `twp_google_contacts` | M4 of 6: connect, both directions, and the two-way rules | Each user connects their own Google account from Odoo. Contacts sync both ways on a schedule, with Google's lists merged rather than replaced, deletes off unless the admin turns them on, and only Google contacts under one label coming into Odoo |
+| `twp_google_contacts` | M5 of 6: connect, both directions, the two-way rules, and each client's choices | Each user connects their own Google account from Odoo. Contacts sync both ways, or one way, on a schedule, with Google's lists merged rather than replaced, deletes off unless the admin turns them on, and only Google contacts under one label coming into Odoo |
 
 This repo is the master copy. Releases are copied into each client's code repo, which is that
 client's addons path on Oduflow.
@@ -44,6 +44,31 @@ added on their own, and any that look like a contact Odoo already has still wait
   a delete. Two linked contacts merged in Google wait on the review list, where "Merge in Odoo"
   opens Odoo's own merge. A contact merged into an unlinked duplicate of the same name is followed.
 * **Photos** sync both ways. Google's generated initials are not a photo.
+
+## Each client's choices
+
+Not every client uses Google Contacts and Odoo the same way, so these are settings, not code.
+
+* **Which way.** Both ways, Odoo to Google only, or Google to Odoo only. Each user picks their own
+  on their Google Contacts tab, starting from the Settings default. Odoo to Google only keeps
+  Google as a copy: nothing comes into Odoo, and a synced detail edited in Google is put back.
+  Google to Odoo only keeps Odoo as a copy: Google's changes always win, and Odoo sends nothing but
+  its hidden anchor. Settings also choose whether Google contacts come in only from the label or
+  all of them; every Odoo user sees what comes in.
+* **Whose contacts.** A contact's owner is its Salesperson. Each user chooses whether their Google
+  gets everyone in scope, only contacts they own, or theirs plus those with no owner. A contact
+  handed to someone else leaves the first user's labels and is never deleted. A contact brought in
+  from Google is owned by the user it came from. Before creating a contact in Google, Odoo looks
+  for one already there with the same email or phone and links it instead, taking nothing from it
+  into Odoo the first time.
+* **Which details.** One box per detail in Settings; the name always syncs.
+* **Tags and labels.** A list of rules pairs an Odoo tag with a Google label and a direction. With
+  a rule both ways, adding a contact to the label in Google adds the tag in Odoo, and taking it out
+  removes it. Tags with no rule become labels of their full name, or are not sent; Google labels
+  with no rule are left alone, or become tags.
+* **Other fields.** A list pairs any Odoo contact field, Studio's included, with a place in Google:
+  a custom field, the birthday, a nickname, a phone or email of a given type (such as the mobile
+  Odoo 19 no longer has), or an ID. Odoo writes only the custom fields named there.
 
 ## Design
 
