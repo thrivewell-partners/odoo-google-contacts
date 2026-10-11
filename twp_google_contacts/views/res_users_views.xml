@@ -15,6 +15,8 @@
                         </group>
                         <group invisible="google_contacts_state == 'none'">
                             <field name="google_contacts_direction" required="google_contacts_state != 'none'"/>
+                            <field name="google_contacts_owners" required="google_contacts_state != 'none'"
+                                   invisible="google_contacts_direction == 'to_odoo'"/>
                         </group>
                     </group>
                     <div class="alert alert-info" role="status"

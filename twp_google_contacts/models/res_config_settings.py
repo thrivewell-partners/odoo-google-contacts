@@ -7,6 +7,9 @@ DEFAULT_LABEL = "Odoo"
 DIRECTIONS = [("both", "Both ways"),
               ("to_google", "Odoo to Google only"),
               ("to_odoo", "Google to Odoo only")]
+OWNERS = [("all", "Everyone in scope"),
+          ("mine", "Only contacts they own"),
+          ("mine_unowned", "Theirs, and contacts with no owner")]
 
 
 class ResConfigSettings(models.TransientModel):
@@ -42,6 +45,13 @@ class ResConfigSettings(models.TransientModel):
              "Google Contacts tab of their preferences. Odoo to Google only: Google keeps a copy "
              "of Odoo's contacts, and a synced detail edited in Google is put back. Google to "
              "Odoo only: Odoo keeps a copy of the Google contacts, and sends nothing to Google.")
+    twp_google_contacts_owners = fields.Selection(
+        OWNERS,
+        string="Whose contacts go to each user's Google",
+        config_parameter="twp_google_contacts.owners",
+        default="all",
+        help="Where each user starts when they connect; each user can change their own. A "
+             "contact's owner is its Salesperson. A person with none takes their company's.")
     twp_google_contacts_import = fields.Selection(
         [("label", "Only those under the label"),
          ("all", "All of each user's contacts")],

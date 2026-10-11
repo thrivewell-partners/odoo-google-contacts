@@ -1,6 +1,9 @@
 from odoo import fields, models
 
 STOPPED = ("gone", "merged")
+# Not synced for now, for a reason in Odoo; synced again once the reason goes.
+HELD = ("archived", "not_mine")
+LIVE = ("active",) + HELD
 
 
 class TwpGoogleContactsLink(models.Model):
@@ -36,6 +39,7 @@ class TwpGoogleContactsLink(models.Model):
     state = fields.Selection(
         [("active", "Synced"),
          ("archived", "Archived in Odoo"),
+         ("not_mine", "Owned by another user"),
          ("gone", "Deleted in Google"),
          ("merged", "Merged in Google")], default="active", required=True)
 

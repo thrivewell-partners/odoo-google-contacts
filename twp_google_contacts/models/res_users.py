@@ -1,10 +1,10 @@
 from odoo import fields, models
 from odoo.exceptions import AccessError
 
-from .res_config_settings import DIRECTIONS
+from .res_config_settings import DIRECTIONS, OWNERS
 
 # Each user's own choices about their sync, kept on their connected account.
-CHOICE_FIELDS = {"google_contacts_direction": "direction"}
+CHOICE_FIELDS = {"google_contacts_direction": "direction", "google_contacts_owners": "owners"}
 USER_FIELDS = ["google_contacts_state", "google_contacts_email", "google_contacts_review_count",
                *CHOICE_FIELDS]
 
@@ -29,6 +29,14 @@ class ResUsers(models.Model):
              "edited in Google is put back. Google to Odoo only: Odoo keeps a copy of your Google "
              "contacts and sends nothing to Google. Changing it compares both sides afresh on the "
              "next sync.")
+    google_contacts_owners = fields.Selection(
+        [("all", "Everyone in scope"),
+         ("mine", "Only contacts I own"),
+         ("mine_unowned", "Mine, and contacts with no owner")],
+        string="Contacts sent to my Google", compute="_compute_google_contacts",
+        inverse="_inverse_google_contacts_choices",
+        help="A contact's owner is its Salesperson. A contact that stops being yours leaves "
+             "Odoo's labels in your Google and is never deleted there.")
 
     @property
     def SELF_READABLE_FIELDS(self):

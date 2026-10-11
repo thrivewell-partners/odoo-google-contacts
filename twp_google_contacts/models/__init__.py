@@ -7,4 +7,5 @@ from . import res_users
 from . import twp_google_contacts_account
 from . import twp_google_contacts_candidate
 from . import twp_google_contacts_label
+from . import twp_google_contacts_key
 from . import twp_google_contacts_link

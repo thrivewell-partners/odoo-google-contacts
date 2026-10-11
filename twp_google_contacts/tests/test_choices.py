@@ -159,3 +159,102 @@ class TestDirection(SyncCase, TransactionCase):
         self.direction("both")
         self.sync()
         self.assertEqual(self.google.emails(resource), ["ada@changed-while-one-way.example"])
+
+
+@tagged("post_install", "-at_install")
+class TestOwnership(SyncCase, TransactionCase):
+    """M5: whose contacts go to whose Google, and a contact Google already has."""
+
+    def setUp(self):
+        super().setUp()
+        self.other = new_test_user(self.env, "owner.other", groups="base.group_user")
+        self.mine = self.Partner.create({"name": "Mine Person", "email": "mine@example.com",
+                                         "user_id": self.env.uid, "category_id": self.scope.ids})
+
+    def owners(self, value):
+        self.env.user.google_contacts_owners = value
+        self.assertEqual(self.account.owners, value)
+
+    def label(self):
+        return self.google.members[self.account.label_resource_name]
+
+    def test_only_my_contacts(self):
+        self.ada.user_id = self.other
+        self.owners("mine")
+        self.sync()
+        self.assertTrue(self.link(self.mine))
+        self.assertFalse(self.link(self.ada))
+
+    def test_mine_and_unowned(self):
+        theirs = self.Partner.create({"name": "Their Person", "email": "theirs@example.com",
+                                      "user_id": self.other.id, "category_id": self.scope.ids})
+        self.owners("mine_unowned")
+        self.sync()
+        self.assertTrue(self.link(self.mine))
+        self.assertTrue(self.link(self.ada))
+        self.assertFalse(self.link(theirs))
+
+    def test_a_person_takes_their_companys_owner(self):
+        self.engines.user_id = self.env.user
+        self.ada.user_id = False
+        self.ada.parent_id = self.engines
+        self.owners("mine")
+        self.sync()
+        self.assertTrue(self.link(self.ada))
+
+    def test_a_contact_handed_to_another_owner_leaves_my_labels_and_comes_back(self):
+        self.owners("mine")
+        self.sync()
+        link = self.link(self.mine)
+        resource = link.resource_name
+        self.assertIn(resource, self.label())
+
+        self.mine.user_id = self.other
+        self.sync()
+        self.assertEqual(link.state, "not_mine")
+        self.assertNotIn(resource, self.label())
+        self.assertIn(resource, self.google.people)  # never deleted in Google
+
+        self.google.change(resource, emailAddresses=[{"value": "mine@while-away.example"}])
+        self.sync()
+        self.assertEqual(self.mine.email, "mine@example.com")  # not synced while it is theirs
+
+        self.mine.user_id = self.env.user
+        self.sync()
+        self.assertEqual(link.state, "active")
+        self.assertIn(resource, self.label())
+        self.assertEqual(self.mine.email, "mine@while-away.example")
+
+    def test_a_contact_brought_in_is_owned_by_the_importing_user(self):
+        self.account.sudo().import_reviewed = True
+        self.grace()
+        self.sync()
+        grace = self.Partner.search([("name", "=", "Grace Hopper")])
+        self.assertEqual(grace.user_id, self.env.user)
+
+    # A contact Google already has.
+
+    def test_a_contact_google_already_has_is_linked_not_duplicated(self):
+        twin = self.google.add(
+            names=[{"givenName": "Ada", "familyName": "L."}],
+            emailAddresses=[{"value": "ADA@example.com", "type": "home"}],
+            addresses=[{"streetAddress": "1 Private Lane", "city": "Carmel", "type": "home"}])
+        self.sync()
+        link = self.link(self.ada)
+        self.assertEqual(link.resource_name, twin)
+        self.assertEqual(len(self.google.people), 2)  # the twin and Mine Person, no second Ada
+        self.assertIn(twin, self.label())
+        self.assertTrue(self.google.people[twin]["clientData"])
+        self.assertFalse(self.ada.street)  # nothing from outside the label came into Odoo
+        phones = [p["value"] for p in self.google.people[twin]["phoneNumbers"]]
+        self.assertEqual(phones, ["(317) 555-0140"])
+        self.assertIn("1 matched to contacts already in Google", self.account.last_sync_result)
+
+    def test_a_contact_anchored_to_another_partner_is_not_a_twin(self):
+        db_uuid = self.env["ir.config_parameter"].sudo().get_param("database.uuid")
+        self.google.add(emailAddresses=[{"value": "ada@example.com"}],
+                        clientData=[{"key": "thrivewell.anchor",
+                                     "value": "odoo:%s:res.partner:%s" % (db_uuid, self.mine.id)}])
+        self.sync()
+        self.assertTrue(self.link(self.ada))
+        self.assertEqual(len(self.google.people), 3)
