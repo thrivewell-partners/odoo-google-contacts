@@ -12,7 +12,7 @@ from odoo.exceptions import AccessError, UserError, ValidationError
 from odoo.tools import escape_psql, html2plaintext, plaintext2html
 
 from . import broker, google_person
-from .res_config_settings import DEFAULT_LABEL
+from .res_config_settings import DEFAULT_LABEL, DIRECTIONS
 from .res_partner import FROM_GOOGLE
 from .twp_google_contacts_link import STOPPED
 
@@ -22,6 +22,8 @@ PEOPLE_API = "https://people.googleapis.com/v1/"
 TIMEOUT = 30
 MAX_ATTEMPTS = 5
 MAX_WAIT = 60
+# A photo Google changed while Odoo's is the one kept: the push puts Odoo's back.
+PUT_BACK = "put-back"
 
 
 def state_message(env, state):
@@ -94,8 +96,23 @@ class TwpGoogleContactsAccount(models.Model):
              "label that match no Odoo contact are added without asking")
     candidate_ids = fields.One2many("twp.google.contacts.candidate", "account_id")
     review_count = fields.Integer(string="To review", compute="_compute_review_count")
+    direction = fields.Selection(
+        DIRECTIONS, required=True, default=lambda self: self._default_choice("direction", "both"),
+        help="The user's own choice, starting from the Settings default when they connect")
 
     _user_unique = models.Constraint("UNIQUE(user_id)", "A user connects one Google account.")
+
+    @api.model
+    def _default_choice(self, name, default):
+        return self.env["ir.config_parameter"].sudo().get_param(
+            "twp_google_contacts." + name) or default
+
+    def write(self, vals):
+        if "direction" in vals:
+            # A new direction starts from a full read, so both sides are compared afresh.
+            changed = self.filtered(lambda a: a.direction != vals["direction"])
+            changed.sudo().write({"sync_token": False})
+        return super().write(vals)
 
     @api.depends("candidate_ids.state")
     def _compute_review_count(self):
@@ -300,10 +317,13 @@ class TwpGoogleContactsAccount(models.Model):
         """Send this account's partners to Google: create what is new, merge what changed in
         Odoo, and keep labels and photos in step. A partner archived or deleted in Odoo leaves
         Odoo's labels in Google and is never deleted there. Each contact is committed once Google
-        has it."""
+        has it. Google to Odoo only sends nothing."""
         self.ensure_one()
         account = self.sudo()
         label_changes = account._stop_or_resume(counts)
+        if account.direction == "to_odoo":
+            account.link_ids.filtered(lambda l: not l.partner_id).unlink()
+            return counts
         partners = account._partners_to_push()
         links = {link.partner_id.id: link for link in account.link_ids if link.partner_id}
         main = account._main_label()
@@ -356,7 +376,7 @@ class TwpGoogleContactsAccount(models.Model):
         changes = []
         for link in self.link_ids.filtered(lambda l: l.state in ("active", "archived")):
             if not link.partner_id.active:
-                if link.label_resource_names:
+                if link.label_resource_names and self.direction != "to_odoo":
                     changes.append((link, []))
                 if link.partner_id:
                     link.state = "archived"
@@ -423,15 +443,17 @@ class TwpGoogleContactsAccount(models.Model):
             "synced_at": fields.Datetime.now(),
         })
 
-    def _update_contact(self, link, values, anchor=None):
+    def _update_contact(self, link, values, anchor=None, groups=None):
         """Merge the groups that changed in Odoo into the contact as Google holds it now, and
         write Odoo's anchor when given one. A stale etag means Google changed the contact
         meanwhile: read it again and merge again (proof 3).
 
         Google's answer becomes the hash Odoo's write is known by when it comes back, unless the
         contact had already changed in Google in a way Odoo has not taken yet (Google's list of
-        changes runs about 30 s behind). Then no hash is kept, so that change still comes in."""
-        groups = google_person.changed_groups(values, link.pushed)
+        changes runs about 30 s behind). Then no hash is kept, so that change still comes in.
+        `groups` limits what is sent; an empty list sends the anchor alone."""
+        if groups is None:
+            groups = google_person.changed_groups(values, link.pushed)
         update_fields = [google_person.GROUPS[group] for group in groups]
         if anchor:
             update_fields.append("clientData")
@@ -484,8 +506,16 @@ class TwpGoogleContactsAccount(models.Model):
                 raise
             self._pull_pages(False, counts)
 
+    def _brings_in(self):
+        """Whether Google contacts come into Odoo, and which: "label" or "all"."""
+        if self.direction == "to_google":
+            return False
+        return self._default_choice("import", "label")
+
     def _pull_pages(self, token, counts):
         label = self._main_label()
+        if self._brings_in() == "all":
+            label = None
         params = {"personFields": google_person.PERSON_FIELDS,
                   "sources": "READ_SOURCE_TYPE_CONTACT", "pageSize": 1000,
                   "requestSyncToken": "true"}
@@ -522,8 +552,9 @@ class TwpGoogleContactsAccount(models.Model):
         for link in lost:
             self._step(link.resource_name, counts, self._lose, link, keys, waiting,
                        not token, counts)
-        for resource, person in list(waiting.items()):
-            self._step(resource, counts, self._offer, person, counts)
+        if self._brings_in():
+            for resource, person in list(waiting.items()):
+                self._step(resource, counts, self._offer, person, counts)
         values = {"sync_token": body.get("nextSyncToken"),
                   "sync_fields": google_person.PERSON_FIELDS}
         if not token:
@@ -573,7 +604,7 @@ class TwpGoogleContactsAccount(models.Model):
                 return  # archived in Odoo; the push picks it up again if it comes back
             self._take_changes(link, person, counts, first=not link.pushed)
             return
-        if not google_person.in_label(person, label):
+        if label and not google_person.in_label(person, label):
             candidate.filtered(lambda c: c.state == "pending").unlink()
             return
         if candidate.resource_name and candidate.resource_name != resource:
@@ -625,7 +656,8 @@ class TwpGoogleContactsAccount(models.Model):
                 counts["followed"] += 1
                 return
             link.state = "merged"
-            self._offer(person, counts, match=(link.partner_id, "merged"))
+            if self._brings_in():
+                self._offer(person, counts, match=(link.partner_id, "merged"))
             return
         link.state = "gone"
         counts["gone"] += 1
@@ -657,9 +689,10 @@ class TwpGoogleContactsAccount(models.Model):
         """Archive the partner of a contact deleted in Google, when Settings say so and no other
         user's Google still has it."""
         partner = link.partner_id
-        if not (partner.active and self.env["ir.config_parameter"].sudo().get_param(
-                "twp_google_contacts.archive_deleted")):
-            return
+        if self.direction == "to_google" or not (
+                partner.active and self.env["ir.config_parameter"].sudo().get_param(
+                    "twp_google_contacts.archive_deleted")):
+            return  # Odoo to Google only: Odoo's contacts are the source, never archived by Google
         if self.env["twp.google.contacts.link"].sudo().search_count([
                 ("partner_id", "=", partner.id), ("id", "!=", link.id),
                 ("state", "in", ("active", "archived"))]):
@@ -711,6 +744,10 @@ class TwpGoogleContactsAccount(models.Model):
         into Google. On a first link, Google only fills what the partner lacks; where both have a
         value and they differ, Odoo's is added to Google's list beside Google's own, so neither
         is lost. The photo follows the same rules.
+
+        Odoo to Google only takes nothing: a group Google changed is put back by the push. Google
+        to Odoo only takes every group Google changed, and records Google's values as the ones in
+        step, since Odoo sends nothing back but its anchor.
         """
         if not first and link.google_hash == google_person.person_hash(person):
             # Odoo's own write coming back, or a change to something Odoo does not sync.
@@ -726,7 +763,9 @@ class TwpGoogleContactsAccount(models.Model):
                     group, google[group], pushed.get(group)):
                 google[group] = pushed[group]
         odoo = google_person.partner_values(partner, html2plaintext)
-        if first:
+        if self.direction == "to_google":
+            take = []
+        elif first:
             take = [g for g in google_person.GROUPS if odoo[g] is None and google[g] is not None]
         else:
             # A partner keeps its name when Google's is cleared.
@@ -745,16 +784,27 @@ class TwpGoogleContactsAccount(models.Model):
                 new_pushed[group] = after[group]
             elif first:
                 new_pushed[group] = after[group] if same else None
-            elif google[group] != pushed.get(group) and odoo[group] != pushed.get(group):
-                # Both changed and Odoo's stands: it takes the place of Google's new value, not a
-                # place beside it.
+            elif google[group] != pushed.get(group) and (
+                    odoo[group] != pushed.get(group) or self.direction == "to_google"):
+                # Odoo's stands: it takes the place of Google's new value, not a place beside it.
                 new_pushed[group] = google[group]
+        if self.direction == "to_odoo":
+            new_pushed = {group: google[group] for group in google_person.GROUPS}
         link.write({"pushed": new_pushed, "etag": person.get("etag"),
                     "google_hash": google_person.person_hash(person),
                     "synced_at": fields.Datetime.now()})
         if first:
-            db_uuid = self.env["ir.config_parameter"].sudo().get_param("database.uuid")
-            self._update_contact(link, after, google_person.anchor(db_uuid, partner.id))
+            self._write_anchor(link, after)
+
+    def _write_anchor(self, link, values):
+        """Write Odoo's anchor on a contact linked from Google, with what Odoo adds to it. Google
+        to Odoo only writes the anchor alone."""
+        db_uuid = self.env["ir.config_parameter"].sudo().get_param("database.uuid")
+        anchor = google_person.anchor(db_uuid, link.partner_id.id)
+        if self.direction == "to_odoo":
+            self._update_contact(link, link.pushed, anchor, groups=[])
+        else:
+            self._update_contact(link, values, anchor)
 
     def _same_value(self, group, a, b):
         if group != "address" or a is None or b is None:
@@ -763,6 +813,8 @@ class TwpGoogleContactsAccount(models.Model):
 
     def _google_wins(self, link, partner, group, person):
         """Whether Google's value stands for a group both sides changed."""
+        if self.direction != "both":
+            return self.direction == "to_odoo"
         rule = self.env["ir.config_parameter"].sudo().get_param(
             "twp_google_contacts.conflict") or "latest"
         if rule != "latest":
@@ -780,6 +832,14 @@ class TwpGoogleContactsAccount(models.Model):
         has for the push to send."""
         url = google_person.photo_url(person)
         checksum = self._photo_sums(partner).get(partner.id)
+        if self.direction == "to_google":
+            if not link.photo_synced:
+                link.write({"photo_synced": True, "photo_url": url or False,
+                            "photo_checksum": url and checksum or False})
+            elif url != (link.photo_url or None):
+                # Changed in Google: the push puts Odoo's photo back, or takes Google's away.
+                link.write({"photo_url": url or False, "photo_checksum": PUT_BACK})
+            return False
         if not link.photo_synced:
             if not url or checksum:
                 link.write({"photo_synced": True, "photo_url": url or False,
@@ -885,11 +945,13 @@ class TwpGoogleContactsAccount(models.Model):
         labels = Label.search([("account_id", "=", self.id), ("resource_name", "in",
                                list(google_person.label_resource_names(person)))])
         values["category_id"] = [Command.set(labels.category_id.ids)]
-        params = self.env["ir.config_parameter"].sudo()
         partner = self.env["res.partner"].with_user(self.user_id).create(values)
         after = google_person.partner_values(partner, html2plaintext)
-        pushed = {group: after[group] if self._same_value(group, after[group], google[group])
-                  else None for group in google_person.GROUPS}
+        if self.direction == "to_odoo":
+            pushed = dict(google)
+        else:
+            pushed = {group: after[group] if self._same_value(group, after[group], google[group])
+                      else None for group in google_person.GROUPS}
         link = self.env["twp.google.contacts.link"].sudo().create({
             "account_id": self.id,
             "partner_id": partner.id,
@@ -902,8 +964,7 @@ class TwpGoogleContactsAccount(models.Model):
             "synced_at": fields.Datetime.now(),
         })
         self._take_photo(link, partner.with_context(**{FROM_GOOGLE: True}), person)
-        db_uuid = params.get_param("database.uuid")
-        self._update_contact(link, after, google_person.anchor(db_uuid, partner.id))
+        self._write_anchor(link, after)
         return partner
 
     def _review(self, candidates, decision):

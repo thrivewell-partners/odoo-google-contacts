@@ -208,7 +208,7 @@ def merge(person, values, pushed, groups=None):
     sent last time. The result maps Google field names to the lists to send.
     """
     out = {}
-    for group in groups or GROUPS:
+    for group in GROUPS if groups is None else groups:
         field = GROUPS[group]
         items = [_clean(item) for item in person.get(field, [])]
         out[field] = MERGERS[group](items, values.get(group), (pushed or {}).get(group))

@@ -13,6 +13,9 @@
                             <field name="google_contacts_email" readonly="1"
                                    invisible="google_contacts_state == 'none'"/>
                         </group>
+                        <group invisible="google_contacts_state == 'none'">
+                            <field name="google_contacts_direction" required="google_contacts_state != 'none'"/>
+                        </group>
                     </group>
                     <div class="alert alert-info" role="status"
                          invisible="not google_contacts_review_count">

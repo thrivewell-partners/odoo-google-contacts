@@ -4,6 +4,10 @@ from .broker import DEFAULT_URL
 
 DEFAULT_LABEL = "Odoo"
 
+DIRECTIONS = [("both", "Both ways"),
+              ("to_google", "Odoo to Google only"),
+              ("to_odoo", "Google to Odoo only")]
+
 
 class ResConfigSettings(models.TransientModel):
     _inherit = "res.config.settings"
@@ -29,6 +33,23 @@ class ResConfigSettings(models.TransientModel):
         default="contactable")
     twp_google_contacts_tag_ids = fields.Many2many(
         related="company_id.twp_google_contacts_tag_ids", readonly=False)
+    twp_google_contacts_direction = fields.Selection(
+        DIRECTIONS,
+        string="Sync direction",
+        config_parameter="twp_google_contacts.direction",
+        default="both",
+        help="Where each user starts when they connect. Each user can change their own on the "
+             "Google Contacts tab of their preferences. Odoo to Google only: Google keeps a copy "
+             "of Odoo's contacts, and a synced detail edited in Google is put back. Google to "
+             "Odoo only: Odoo keeps a copy of the Google contacts, and sends nothing to Google.")
+    twp_google_contacts_import = fields.Selection(
+        [("label", "Only those under the label"),
+         ("all", "All of each user's contacts")],
+        string="Google contacts brought into Odoo",
+        config_parameter="twp_google_contacts.import",
+        default="label",
+        help="All: every contact in a user's Google comes into Odoo, where every Odoo user can "
+             "see it. The label is how a user keeps personal contacts out of Odoo.")
     twp_google_contacts_conflict = fields.Selection(
         [("latest", "The most recent change"),
          ("odoo", "Odoo's"),

@@ -18,6 +18,14 @@
                             <field name="twp_google_contacts_broker_url"/>
                         </div>
                         <div class="row mt8">
+                            <label for="twp_google_contacts_direction" class="col-lg-4 o_light_label"/>
+                            <field name="twp_google_contacts_direction"/>
+                        </div>
+                        <div class="row">
+                            <label for="twp_google_contacts_import" class="col-lg-4 o_light_label"/>
+                            <field name="twp_google_contacts_import"/>
+                        </div>
+                        <div class="row">
                             <label for="twp_google_contacts_scope" class="col-lg-4 o_light_label"/>
                             <field name="twp_google_contacts_scope"/>
                         </div>

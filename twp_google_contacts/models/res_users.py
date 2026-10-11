@@ -1,7 +1,12 @@
 from odoo import fields, models
 from odoo.exceptions import AccessError
 
-USER_FIELDS = ["google_contacts_state", "google_contacts_email", "google_contacts_review_count"]
+from .res_config_settings import DIRECTIONS
+
+# Each user's own choices about their sync, kept on their connected account.
+CHOICE_FIELDS = {"google_contacts_direction": "direction"}
+USER_FIELDS = ["google_contacts_state", "google_contacts_email", "google_contacts_review_count",
+               *CHOICE_FIELDS]
 
 
 class ResUsers(models.Model):
@@ -17,10 +22,21 @@ class ResUsers(models.Model):
         string="Google account", compute="_compute_google_contacts")
     google_contacts_review_count = fields.Integer(
         string="Google contacts to review", compute="_compute_google_contacts")
+    google_contacts_direction = fields.Selection(
+        DIRECTIONS, string="Sync direction", compute="_compute_google_contacts",
+        inverse="_inverse_google_contacts_choices",
+        help="Odoo to Google only: your Google keeps a copy of Odoo's contacts, and a detail "
+             "edited in Google is put back. Google to Odoo only: Odoo keeps a copy of your Google "
+             "contacts and sends nothing to Google. Changing it compares both sides afresh on the "
+             "next sync.")
 
     @property
     def SELF_READABLE_FIELDS(self):
         return super().SELF_READABLE_FIELDS + USER_FIELDS
+
+    @property
+    def SELF_WRITEABLE_FIELDS(self):
+        return super().SELF_WRITEABLE_FIELDS + list(CHOICE_FIELDS)
 
     def _compute_google_contacts(self):
         accounts = self.env["twp.google.contacts.account"].sudo().search(
@@ -31,6 +47,16 @@ class ResUsers(models.Model):
             user.google_contacts_state = account.state if account else "none"
             user.google_contacts_email = account.google_email if account else False
             user.google_contacts_review_count = account.review_count if account else 0
+            for name, account_field in CHOICE_FIELDS.items():
+                user[name] = account[account_field] if account else False
+
+    def _inverse_google_contacts_choices(self):
+        for user in self:
+            account = user._google_contacts_account()
+            values = {account_field: user[name] for name, account_field in CHOICE_FIELDS.items()
+                      if user[name] and user[name] != account[account_field]}
+            if account and values:
+                account.write(values)
 
     def _google_contacts_account(self):
         """The user's own account. Only the user, or an administrator, may act on it."""
