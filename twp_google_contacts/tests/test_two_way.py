@@ -40,7 +40,7 @@ class TestTwoWay(SyncCase, TransactionCase):
         self.sync()
         self.assertEqual(self.ada.phone, "(317) 555-0177")
         phones = [p["value"] for p in self.google.people[resource]["phoneNumbers"]]
-        self.assertEqual(phones[0], "(317) 555-0177")
+        self.assertEqual(phones, ["(317) 555-0177"])
 
     def test_a_group_only_google_changed_comes_in_whatever_its_time(self):
         resource = self.linked().resource_name

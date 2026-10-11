@@ -190,7 +190,7 @@ class TestPull(SyncCase, TransactionCase):
         self.ada.email = "ada@odoo-side.example"
         self.sync()
         self.assertEqual(self.ada.email, "ada@odoo-side.example")
-        self.assertEqual(self.google.emails(resource)[0], "ada@odoo-side.example")
+        self.assertEqual(self.google.emails(resource), ["ada@odoo-side.example"])
 
     def test_odoos_own_write_coming_back_is_ignored(self):
         self.sync()

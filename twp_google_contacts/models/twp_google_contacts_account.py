@@ -745,6 +745,10 @@ class TwpGoogleContactsAccount(models.Model):
                 new_pushed[group] = after[group]
             elif first:
                 new_pushed[group] = after[group] if same else None
+            elif google[group] != pushed.get(group) and odoo[group] != pushed.get(group):
+                # Both changed and Odoo's stands: it takes the place of Google's new value, not a
+                # place beside it.
+                new_pushed[group] = google[group]
         link.write({"pushed": new_pushed, "etag": person.get("etag"),
                     "google_hash": google_person.person_hash(person),
                     "synced_at": fields.Datetime.now()})
