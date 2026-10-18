@@ -92,6 +92,8 @@ class GoogleContactsCase:
         # Each test starts from the default choices, whatever the database it runs on has set.
         for key in CHOICES:
             params.set_param(key, False)
+        # Fields mapped to Google are a choice too, such as a mobile phone field of its own.
+        cls.env["twp.google.contacts.field.map"].sudo().search([]).unlink()
         cls.Account = cls.env["twp.google.contacts.account"]
 
     def setUp(self):
